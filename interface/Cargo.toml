@@ -1,0 +1,17 @@
+[package]
+name = "tee-interface"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Serialization
+borsh.workspace = true
+
+# TEE interface
+sallyport.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Crypto
+sha2.workspace = true

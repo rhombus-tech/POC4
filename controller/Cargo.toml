@@ -1,0 +1,27 @@
+[package]
+name = "tee-controller"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Our interface
+tee-interface = { path = "../interface" }
+
+# Core deps
+tokio = { version = "1.0", features = ["full"] }
+borsh.workspace = true
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
+# Error handling
+thiserror.workspace = true
+
+# TEE/Enarx interaction
+sallyport.workspace = true
+
+# Crypto
+sha2.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"

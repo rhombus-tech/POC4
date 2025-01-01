@@ -1,0 +1,17 @@
+[package]
+name = "tee-wasm-module"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]  # Compile as dynamic library for WASM
+
+[dependencies]
+wasm-bindgen.workspace = true
+borsh.workspace = true
+tee-interface = { path = "../interface" }
+sallyport.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

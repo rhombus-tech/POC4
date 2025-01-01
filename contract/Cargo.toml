@@ -1,0 +1,20 @@
+[package]
+name = "tee-contract"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Contract runtime
+wasmlanche = { version = "0.1.0" }
+
+# Interface and serialization
+tee-interface = { path = "../interface" }
+borsh.workspace = true
+
+# Crypto
+sha2.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+[dev-dependencies]
