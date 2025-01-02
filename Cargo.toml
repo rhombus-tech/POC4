@@ -1,6 +1,5 @@
 [workspace]
-resolver = "2"  # Using resolver 2 for edition 2021 compatibility
-
+resolver = "2"  
 members = [
     "interface",
     "wasm-module",
@@ -34,3 +33,8 @@ thiserror = "1.0"
 
 # WASM
 wasm-bindgen = "0.2"
+
+# gRPC (new)
+tonic = { version = "0.9", features = ["transport"] }
+prost = "0.11"
+tonic-build = "0.9"
