@@ -5,6 +5,7 @@ members = [
     "wasm-module",
     "controller",
     "contract"
+    "service"
 ]
 
 [workspace.package]
