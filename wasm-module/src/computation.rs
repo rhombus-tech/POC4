@@ -21,12 +21,15 @@ impl ComputationEngine {
     }
 
     /// Execute computation on input data
-    pub fn execute(&mut self, payload: ExecutionPayload) -> Result<Vec<u8>, ComputationError> {
+    /// Changed to return String error to match Hypersdk error handling
+    pub fn execute(&mut self, payload: ExecutionPayload) -> Result<Vec<u8>, String> {
         // Track execution
         self.state.total_executions += 1;
 
         // Process input based on computation type
-        let result = match decode_computation_type(&payload.input)? {
+        let result = match decode_computation_type(&payload.input)
+            .map_err(|e| e.to_string())? 
+        {
             ComputationType::Hash => self.compute_hash(payload.input),
             ComputationType::Sort => self.compute_sort(payload.input),
             ComputationType::Transform => self.compute_transform(payload.input),
@@ -39,20 +42,20 @@ impl ComputationEngine {
     }
 
     /// Compute hash of data
-    fn compute_hash(&self, data: Vec<u8>) -> Result<Vec<u8>, ComputationError> {
+    fn compute_hash(&self, data: Vec<u8>) -> Result<Vec<u8>, String> {
         let mut hasher = Sha256::new();
         hasher.update(&data);
         Ok(hasher.finalize().to_vec())
     }
 
     /// Sort input data
-    fn compute_sort(&self, mut data: Vec<u8>) -> Result<Vec<u8>, ComputationError> {
+    fn compute_sort(&self, mut data: Vec<u8>) -> Result<Vec<u8>, String> {
         data.sort();
         Ok(data)
     }
 
     /// Transform data (example: increment each byte)
-    fn compute_transform(&self, data: Vec<u8>) -> Result<Vec<u8>, ComputationError> {
+    fn compute_transform(&self, data: Vec<u8>) -> Result<Vec<u8>, String> {
         Ok(data.into_iter().map(|b| b.wrapping_add(1)).collect())
     }
 
@@ -74,16 +77,16 @@ enum ComputationType {
     Transform,
 }
 
-fn decode_computation_type(input: &[u8]) -> Result<ComputationType, ComputationError> {
+fn decode_computation_type(input: &[u8]) -> Result<ComputationType, String> {
     if input.is_empty() {
-        return Err(ComputationError::InvalidInput("Empty input".into()));
+        return Err("Empty input".into());
     }
 
     match input[0] {
         0 => Ok(ComputationType::Hash),
         1 => Ok(ComputationType::Sort),
         2 => Ok(ComputationType::Transform),
-        _ => Err(ComputationError::InvalidInput("Unknown computation type".into())),
+        _ => Err("Unknown computation type".into()),
     }
 }
 
@@ -91,15 +94,6 @@ fn compute_state_hash(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().into()
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ComputationError {
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
-    #[error("Computation failed: {0}")]
-    ExecutionError(String),
 }
 
 #[cfg(test)]

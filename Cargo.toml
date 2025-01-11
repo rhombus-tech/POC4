@@ -32,9 +32,6 @@ sha2 = "0.10"
 # Error handling
 thiserror = "1.0"
 
-# WASM
-wasm-bindgen = "0.2"
-
 # gRPC (new)
 tonic = { version = "0.9", features = ["transport"] }
 prost = "0.11"
