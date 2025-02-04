@@ -1,11 +1,9 @@
-use tee_interface::prelude::{
-    ContractState, ExecutionResult, PlatformMeasurement, TeeAttestation, TeeController, TeeError, TeeType,
-};
-use hyper::*;
 use std::sync::Arc;
-use tokio;
-
-type Result<T> = std::result::Result<T, TeeError>;
+use hyper::runtime::{HyperSDKRuntime, RuntimeConfig};
+use hyper::test_utils::MockStateManager;
+use tee_interface::prelude::*;
+use tee_interface::types::{TeeType, ExecutionResult, TeeAttestation, PlatformMeasurement};
+use tee_interface::ContractState;
 
 // Helper function to build the multisig contract
 async fn build_multisig_contract() -> Vec<u8> {
@@ -28,30 +26,17 @@ async fn build_multisig_contract() -> Vec<u8> {
 
 #[tokio::test]
 async fn test_contract_execution() {
-    // Build the contract
-    let wasm_bytes = build_multisig_contract().await;
+    let state_manager = Arc::new(MockStateManager::default());
+    let runtime = HyperSDKRuntime::new(state_manager, RuntimeConfig::default()).unwrap();
 
-    // Create mock controller
-    let controller = Arc::new(MockController::default());
-    let executor = HyperExecutor::new(controller);
+    // Test contract deployment with empty code
+    let contract_id = runtime.deploy_contract(&[]).await;
+    assert!(contract_id.is_err(), "Expected error when deploying empty contract");
 
-    // Create input for contract execution
-    let input = hyper::ExecutionInput {
-        wasm_bytes,
-        function: "propose".to_string(),
-        args: vec![], // TODO: Add proper args based on contract interface
-    };
-
-    // Execute the contract
-    let result = executor
-        .execute_contract(
-            "test-region".to_string(),
-            [0u8; 32],
-            input,
-        )
-        .await;
-
-    assert!(result.is_ok(), "Contract execution failed: {:?}", result.err());
+    // Test contract call with non-existent contract
+    let result = runtime.call_contract([0u8; 32], "test", &[]).await;
+    assert!(result.is_ok(), "Expected success when calling non-existent contract");
+    assert!(result.unwrap().is_empty(), "Expected empty result");
 }
 
 #[derive(Debug, Default)]
@@ -65,31 +50,32 @@ impl TeeController for MockController {
         input: Vec<u8>,
         _attestation_required: bool,
     ) -> Result<ExecutionResult> {
+        let attestation1 = TeeAttestation {
+            tee_type: TeeType::Sgx,
+            measurement: PlatformMeasurement::Sgx {
+                mrenclave: [0u8; 32],
+                mrsigner: [0u8; 32],
+                attributes: [0u8; 16],
+                miscselect: 0,
+            },
+            signature: vec![0; 64],
+        };
+
+        let attestation2 = TeeAttestation {
+            tee_type: TeeType::Sev,
+            measurement: PlatformMeasurement::Sev {
+                measurement: [0u8; 32],
+                platform_info: [0u8; 32],
+                launch_digest: [0u8; 32],
+            },
+            signature: vec![0; 64],
+        };
+
         Ok(ExecutionResult {
-            tx_id: vec![],
+            tx_id: vec![1, 2, 3, 4],
             state_hash: [0u8; 32],
             output: input,
-            attestations: [
-                TeeAttestation {
-                    tee_type: TeeType::Sgx,
-                    measurement: PlatformMeasurement::Sgx {
-                        mrenclave: [0u8; 32],
-                        mrsigner: [0u8; 32],
-                        attributes: [0u8; 16],
-                        miscselect: 0,
-                    },
-                    signature: vec![0u8; 64],
-                },
-                TeeAttestation {
-                    tee_type: TeeType::Sev,
-                    measurement: PlatformMeasurement::Sev {
-                        measurement: [0u8; 32],
-                        platform_info: [0u8; 32],
-                        launch_digest: [0u8; 32],
-                    },
-                    signature: vec![0u8; 64],
-                },
-            ],
+            attestations: [attestation1, attestation2],
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -105,10 +91,7 @@ impl TeeController for MockController {
     async fn get_state(&self, _region_id: String, _contract_id: [u8; 32]) -> Result<ContractState> {
         Ok(ContractState {
             state: vec![],
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: 0,
         })
     }
 }

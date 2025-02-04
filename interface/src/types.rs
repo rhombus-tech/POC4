@@ -45,16 +45,25 @@ pub enum ExecutionState {
 /// Platform-specific measurements
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub enum PlatformMeasurement {
+    /// Intel SGX measurements
     Sgx {
+        /// MRENCLAVE measurement
         mrenclave: [u8; 32],
+        /// MRSIGNER measurement
         mrsigner: [u8; 32],
+        /// MISCSELECT value
         miscselect: u32,
-        attributes: u64,
+        /// SGX attributes
+        attributes: [u8; 16],
     },
+    /// AMD SEV measurements
     Sev {
+        /// Platform measurement
         measurement: [u8; 32],
-        policy: u32,
-        signature: Vec<u8>,
+        /// Platform information
+        platform_info: [u8; 32],
+        /// Launch digest
+        launch_digest: [u8; 32],
     },
 }
 
@@ -120,11 +129,11 @@ pub struct ExecutionResult {
     pub state_hash: [u8; 32],
     /// Output data
     pub output: Vec<u8>,
-    /// TEE attestations
-    pub attestations: Vec<TeeAttestation>,
-    /// Execution timestamp
+    /// Attestations from TEEs
+    pub attestations: [TeeAttestation; 2],
+    /// Timestamp of execution
     pub timestamp: u64,
-    /// Region ID
+    /// Region ID where executed
     pub region_id: String,
 }
 
@@ -144,11 +153,11 @@ pub struct VerificationResult {
 /// Attestation from a TEE
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct TeeAttestation {
-    /// Type of TEE that generated this attestation
+    /// TEE type (SGX/SEV)
     pub tee_type: TeeType,
-    /// Measurement of the code/data in the TEE
-    pub measurement: Vec<u8>,
-    /// Signature over the measurement
+    /// Platform-specific measurement data
+    pub measurement: PlatformMeasurement,
+    /// Signature over measurement
     pub signature: Vec<u8>,
 }
 
@@ -202,7 +211,7 @@ mod tests {
             mrenclave: [0u8; 32],
             mrsigner: [1u8; 32],
             miscselect: 0,
-            attributes: 0,
+            attributes: [0u8; 16],
         };
 
         let serialized = measurement.try_to_vec().unwrap();

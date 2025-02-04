@@ -1,0 +1,14 @@
+cargo:rustc-cfg=feature="arm64"
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=src/prelude.isle
+cargo:rerun-if-changed=src/isa/x64/inst.isle
+cargo:rerun-if-changed=src/isa/x64/lower.isle
+cargo:rerun-if-changed=src/prelude.isle
+cargo:rerun-if-changed=src/isa/aarch64/inst.isle
+cargo:rerun-if-changed=src/isa/aarch64/inst_neon.isle
+cargo:rerun-if-changed=src/isa/aarch64/lower.isle
+cargo:rerun-if-changed=src/isa/aarch64/lower_dynamic_neon.isle
+cargo:rerun-if-changed=src/prelude.isle
+cargo:rerun-if-changed=src/isa/s390x/inst.isle
+cargo:rerun-if-changed=src/isa/s390x/lower.isle
+cargo:rustc-env=ISLE_DIR=/Users/talzisckind/Downloads/vm-parallel-process-7/execution/target/debug/build/cranelift-codegen-92385e3d7a4e5815/out

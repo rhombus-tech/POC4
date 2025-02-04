@@ -4,19 +4,23 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tee-interface = { path = "../interface" }
-borsh = "0.10.3"
-borsh-derive = "0.10.3"
+anyhow = "1.0"
+async-trait = "0.1.77"
+borsh = "1.3.0"
+borsh-derive = "1.3.0"
+getrandom = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0.56"
 tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1.74"
-rand = "0.8.5"
-futures = "0.3"
-thiserror = "1.0"
-governor = "0.6"
-nonzero_ext = "0.3"
+tee-interface = { path = "../interface" }
+wasmtime = "14.0"
+wat = "1.0"
+
+[build-dependencies]
+bindgen = "0.69.1"
+cc = "1.0"
 
 [dev-dependencies]
-tokio-test = "0.4"
 tokio = { version = "1.0", features = ["full", "test-util"] }
-wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
-multisig = { path = "../../hyper/x/contracts/examples/multisig" }
+tokio-test = "0.4.3"

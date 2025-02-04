@@ -1,0 +1,3 @@
+cargo:warning=`.wasm` file at "/Users/talzisckind/Downloads/vm-parallel-process-7/hyper/x/contracts/examples/multisig/build/wasm32-unknown-unknown/debug/multisig.wasm"
+cargo:rustc-env=CONTRACT_PATH=/Users/talzisckind/Downloads/vm-parallel-process-7/hyper/x/contracts/examples/multisig/build/wasm32-unknown-unknown/debug/multisig.wasm
+cargo:warning=If the simulator fails to find the "multisig" contract, try running `cargo clean -p multisig` followed by `cargo test` again.

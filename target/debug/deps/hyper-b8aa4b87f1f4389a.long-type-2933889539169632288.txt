@@ -1,0 +1,2 @@
+Pin<Box<dyn Future<Output = result::Result<types::ExecutionResult, tee_interface::TeeError>> + Send>>
+Pin<Box<dyn Future<Output = std::result::Result<tee_interface::ExecutionResult, tee_interface::TeeError>> + Send>>
