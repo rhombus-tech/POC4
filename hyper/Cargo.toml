@@ -5,5 +5,13 @@ edition = "2021"
 
 [dependencies]
 tee-interface = { path = "../interface" }
-async-trait = { workspace = true }
-tokio = { workspace = true }
+borsh = "0.10.3"
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1.74"
+rand = "0.8.5"
+futures = "0.3"
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tokio = { version = "1.0", features = ["full", "test-util"] }
