@@ -1,27 +1,18 @@
 use clap::Parser;
 use tee_interface::prelude::*;
-use std::process::Command;
 use std::path::PathBuf;
 
 mod enarx;
 mod verification;
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to WASM module
     #[arg(short, long)]
-    wasm_module: PathBuf,
+    wasm: PathBuf,
 
-    /// Input data for computation
-    #[arg(short, long)]
-    input: PathBuf,
-
-    /// Output path for results
-    #[arg(short, long)]
-    output: PathBuf,
-
-    /// Enable verbose logging
+    /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
 }
@@ -30,80 +21,60 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize controller
-    let controller = enarx::Controller::new(args.verbose)?;
+    // Check platform support
+    let (sgx_supported, sev_supported) = enarx::verify_platforms()?;
+    println!("Platform support:");
+    println!("  SGX: {}", sgx_supported);
+    println!("  SEV: {}", sev_supported);
 
-    println!("Starting dual TEE execution...");
-
-    // Execute in SGX
-    println!("Executing in SGX...");
-    let sgx_result = controller.execute_sgx(&args.wasm_module, &args.input).await?;
-
-    // Execute in SEV
-    println!("Executing in SEV...");
-    let sev_result = controller.execute_sev(&args.wasm_module, &args.input).await?;
-
-    // Verify results match
-    println!("Verifying results...");
-    let verification_result = verification::verify_results(&sgx_result, &sev_result)?;
-
-    if verification_result.verified {
-        println!("✅ Execution verified! Results match between SGX and SEV");
-        println!("Result hash: {:?}", verification_result.result_hash);
-
-        // Save result to output file
-        std::fs::write(&args.output, &sgx_result.result)?;
-        println!("Results saved to: {}", args.output.display());
-
-        // Print attestation info if verbose
-        if args.verbose {
-            println!("\nSGX Attestation:");
-            print_attestation(&sgx_result.attestation);
-            println!("\nSEV Attestation:");
-            print_attestation(&sev_result.attestation);
-        }
-    } else {
-        eprintln!("❌ Verification failed: Results don't match!");
+    if !sgx_supported && !sev_supported {
+        eprintln!("No supported TEE platforms found");
         std::process::exit(1);
+    }
+
+    // Execute in both TEEs
+    let sgx_result = enarx::execute_sgx(&args.wasm).await?;
+    let sev_result = enarx::execute_sev(&args.wasm).await?;
+
+    // Print attestations if verbose
+    if args.verbose {
+        println!("\nSGX Attestation:");
+        print_attestation(&sgx_result.attestations[0]);
+        println!("\nSEV Attestation:");
+        print_attestation(&sev_result.attestations[0]);
     }
 
     Ok(())
 }
 
-fn print_attestation(attestation: &AttestationReport) {
-    println!("  Type: {:?}", attestation.enclave_type);
-    println!("  Timestamp: {}", attestation.timestamp);
+fn print_attestation(attestation: &TeeAttestation) {
+    println!("  Type: {:?}", attestation.tee_type);
     println!("  Measurement: {:?}", attestation.measurement);
-    if !attestation.platform_data.is_empty() {
-        println!("  Platform data size: {}", attestation.platform_data.len());
-    }
+    println!("  Signature: {:?}", attestation.signature);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[tokio::test]
     async fn test_basic_execution() {
-        // Create test files
-        let temp_dir = tempfile::tempdir().unwrap();
-        let wasm_path = temp_dir.path().join("test.wasm");
-        let input_path = temp_dir.path().join("input.dat");
-        let output_path = temp_dir.path().join("output.dat");
-
-        // Write test data
-        std::fs::write(&input_path, b"test data").unwrap();
+        // Create test WASM file
+        let wasm_path = PathBuf::from("test.wasm");
+        fs::write(&wasm_path, b"test wasm").unwrap();
 
         // Create test args
         let args = Args {
-            wasm_module: wasm_path,
-            input: input_path,
-            output: output_path,
+            wasm: wasm_path.clone(),
             verbose: false,
         };
 
         // Test execution
-        let controller = enarx::Controller::new(false).unwrap();
-        assert!(controller.execute_sgx(&args.wasm_module, &args.input).await.is_ok());
+        let result = enarx::execute_sgx(&args.wasm).await;
+        assert!(result.is_err()); // Should fail because we provided invalid WASM
+
+        // Cleanup
+        fs::remove_file(wasm_path).unwrap();
     }
 }

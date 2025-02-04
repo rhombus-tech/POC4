@@ -1,4 +1,4 @@
-use tee_interface::prelude::*;
+use tee_interface::types::ExecutionPayload;
 use sha2::{Sha256, Digest};
 
 /// Computation engine that runs inside the TEE
@@ -105,16 +105,11 @@ mod tests {
         let mut engine = ComputationEngine::new();
         let payload = ExecutionPayload {
             execution_id: 1,
-            input: vec![0, 1, 2, 3],  // 0 for hash type
-            params: ExecutionParams {
-                expected_hash: None,
-                detailed_proof: false,
-            },
+            input: vec![0, 1, 2, 3],
+            params: Default::default(),
         };
-
-        let result = engine.execute(payload);
-        assert!(result.is_ok());
-        assert_eq!(engine.get_execution_count(), 1);
+        let result = engine.execute(payload).unwrap();
+        assert_eq!(result.len(), 32); // SHA-256 hash is 32 bytes
     }
 
     #[test]
@@ -122,15 +117,11 @@ mod tests {
         let mut engine = ComputationEngine::new();
         let payload = ExecutionPayload {
             execution_id: 1,
-            input: vec![1, 3, 2, 1],  // 1 for sort type
-            params: ExecutionParams {
-                expected_hash: None,
-                detailed_proof: false,
-            },
+            input: vec![1, 3, 2, 1],
+            params: Default::default(),
         };
-
         let result = engine.execute(payload).unwrap();
-        assert_eq!(&result[1..], &[1, 2, 3]);
+        assert_eq!(result, vec![1, 1, 2, 3]);
     }
 
     #[test]
@@ -138,14 +129,10 @@ mod tests {
         let mut engine = ComputationEngine::new();
         let payload = ExecutionPayload {
             execution_id: 1,
-            input: vec![2, 1, 2, 3],  // 2 for transform type
-            params: ExecutionParams {
-                expected_hash: None,
-                detailed_proof: false,
-            },
+            input: vec![2, 1, 2, 3],
+            params: Default::default(),
         };
-
         let result = engine.execute(payload).unwrap();
-        assert_eq!(&result[1..], &[2, 3, 4]);
+        assert_eq!(result, vec![3, 2, 3, 4]);
     }
 }

@@ -10,6 +10,8 @@ tee-interface = { path = "../interface" }
 # Core deps
 tokio = { version = "1.0", features = ["full"] }
 borsh.workspace = true
+borsh-derive = "0.10.3"
+async-trait.workspace = true
 
 # CLI
 clap = { version = "4.0", features = ["derive"] }
@@ -17,11 +19,12 @@ clap = { version = "4.0", features = ["derive"] }
 # Error handling
 thiserror.workspace = true
 
-# TEE/Enarx interaction
-sallyport.workspace = true
-
 # Crypto
 sha2.workspace = true
+
+# Utils
+rand = "0.8"
+tempfile = "3.8"
 
 [dev-dependencies]
 tokio-test = "0.4"

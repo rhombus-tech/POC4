@@ -8,8 +8,10 @@ crate-type = ["cdylib"]  # Compile as dynamic library for WASM
 
 [dependencies]
 borsh.workspace = true
+borsh-derive = "0.10.3"
 tee-interface = { path = "../interface" }
-sallyport.workspace = true
 sha2.workspace = true
+thiserror = "1.0"
+log = "0.4"
 
 [dev-dependencies]

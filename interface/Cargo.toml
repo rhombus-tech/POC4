@@ -5,13 +5,14 @@ edition.workspace = true
 
 [dependencies]
 # Serialization
-borsh.workspace = true
-
-# TEE interface
-sallyport.workspace = true
+borsh = "0.10.3"
+borsh-derive = "0.10.3"
 
 # Error handling
-thiserror.workspace = true
+thiserror = { workspace = true }
 
 # Crypto
-sha2.workspace = true
+sha2 = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
