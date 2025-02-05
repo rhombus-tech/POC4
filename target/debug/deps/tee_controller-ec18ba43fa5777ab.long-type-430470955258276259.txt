@@ -1,0 +1,1 @@
+impl Future<Output = std::option::Option<std::sync::Arc<{type error}, {type error}>>>

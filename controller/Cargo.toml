@@ -1,29 +1,27 @@
 [package]
 name = "tee-controller"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
-# Our interface
+# Internal dependencies
 tee-interface = { path = "../interface" }
+hyper = { path = "../hyper" }
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["simulator"] }
 
-# Core deps
+# Async
 tokio = { version = "1.0", features = ["full", "macros"] }
-borsh = { version = "1.5.1", features = ["derive", "std"] }
-borsh-derive = { version = "1.5.1" }
 async-trait = "0.1"
 
-# gRPC
-tonic = { version = "0.10", features = ["transport", "codegen"] }
-prost = "0.12"
-tower = "0.4"
-
 # CLI
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.0", features = ["derive"] }
+clap_derive = "4.0"
 
-# Logging
-tracing = "0.1"
-tracing-subscriber = "0.3"
+# Serialization
+borsh = { version = "1.2", features = ["derive"] }
+borsh-derive = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # Error handling
 thiserror = "1.0"
@@ -34,12 +32,16 @@ sha2 = "0.10"
 # Time
 chrono = "0.4"
 
-# Utils
-rand = "0.8"
+# Temporary files
 tempfile = "3.8"
 
-[build-dependencies]
-tonic-build = "0.10"
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
-[dev-dependencies]
-tokio-test = "0.4"
+# gRPC
+tonic = { version = "0.10", features = ["transport"] }
+prost = "0.12"
+
+[build-dependencies]
+tonic-build = { version = "0.10", features = ["prost"] }

@@ -1,0 +1,11 @@
+[package]
+name = "wasmlanche-sim"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+simulator = []
+
+[dependencies]
+wasmi = "0.31"
+anyhow = "1.0"

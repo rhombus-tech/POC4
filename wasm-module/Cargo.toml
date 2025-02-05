@@ -26,8 +26,6 @@ sha2 = "0.10"
 log = "0.4"
 
 # Wasmlanche
-sdk-macros = { path = "../../hyper/x/contracts/sdk-macros" }
-simulator = { path = "../../hyper/x/contracts/simulator" }
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
 
 [build-dependencies]

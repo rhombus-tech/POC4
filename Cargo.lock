@@ -167,7 +167,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
- "hyper",
+ "hyper 0.14.32",
  "itoa",
  "matchit",
  "memchr",
@@ -688,6 +688,15 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "tee-interface",
+ "tokio",
+]
+
+[[package]]
+name = "hyper"
 version = "0.14.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41dfc780fdec9373c01bae43289ea34c972e40ee3c9f6b3c8801a35f35586ce7"
@@ -716,7 +725,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbb958482e8c7be4bc3cf272a766a2b0bf1a6755e7a6ae777f017a31d11b13b1"
 dependencies = [
- "hyper",
+ "hyper 0.14.32",
  "pin-project-lite",
  "tokio",
  "tokio-io-timeout",
@@ -1383,19 +1392,21 @@ dependencies = [
  "borsh-derive",
  "chrono",
  "clap",
+ "clap_derive",
+ "hyper 0.1.0",
  "prost",
- "rand",
+ "serde",
+ "serde_json",
  "sha2",
  "tee-interface",
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-test",
  "tonic",
  "tonic-build",
- "tower",
  "tracing",
  "tracing-subscriber",
+ "wasmlanche",
 ]
 
 [[package]]
@@ -1405,12 +1416,16 @@ dependencies = [
  "async-trait",
  "borsh",
  "borsh-derive",
+ "log",
  "proc-macro2",
  "prost",
  "quote",
+ "serde",
+ "serde_json",
  "sha2",
  "syn",
  "thiserror",
+ "tokio",
  "tonic",
  "tonic-build",
 ]
@@ -1510,19 +1525,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-test"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468baabc3311435b55dd935f702f42cd1b8abb7e754fb7dfb16bd36aa88f9f7"
-dependencies = [
- "async-stream",
- "bytes",
- "futures-core",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1566,7 +1568,7 @@ dependencies = [
  "h2",
  "http",
  "http-body",
- "hyper",
+ "hyper 0.14.32",
  "hyper-timeout",
  "percent-encoding",
  "pin-project",
@@ -1630,7 +1632,6 @@ version = "0.1.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "784e0ac535deb450455cbfa28a6f0df145ea1bb7ae51b821cf5e7927fdcfbdd0"
 dependencies = [
- "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
@@ -1807,11 +1808,9 @@ dependencies = [
  "borsh",
  "borsh-derive",
  "log",
- "sdk-macros",
  "serde",
  "serde_json",
  "sha2",
- "simulator",
  "tee-interface",
  "thiserror",
  "tonic-build",

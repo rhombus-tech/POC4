@@ -1,0 +1,2 @@
+# command-line-arguments
+ld: warning: ignoring duplicate libraries: '-force_load /Users/talzisckind/Downloads/aristo-fresh/hyper/target/debug/callbacks.o', '-lcallbacks'

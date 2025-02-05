@@ -1,7 +1,8 @@
 use borsh::{BorshSerialize, BorshDeserialize};
+use serde::{Serialize, Deserialize};
 
 /// Input payload for TEE execution
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ExecutionPayload {
     /// Unique identifier for this execution
     pub execution_id: u64,
@@ -11,8 +12,18 @@ pub struct ExecutionPayload {
     pub params: ExecutionParams,
 }
 
+impl Default for ExecutionPayload {
+    fn default() -> Self {
+        Self {
+            execution_id: 0,
+            input: Vec::new(),
+            params: ExecutionParams::default(),
+        }
+    }
+}
+
 /// Parameters for execution
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct ExecutionParams {
     /// Expected result hash if doing verification
     pub expected_hash: Option<[u8; 32]>,
@@ -54,7 +65,7 @@ pub struct ExecutionProof {
 }
 
 /// Configuration for TEE execution
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TeeConfig {
     /// Maximum input size in bytes
     pub max_input_size: usize,

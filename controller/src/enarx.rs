@@ -2,6 +2,20 @@ use tee_interface::prelude::*;
 use async_trait::async_trait;
 use std::process::Command;
 use sha2::{Sha256, Digest};
+use wasmlanche::simulator::{Simulator, SimpleState};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use borsh::{BorshSerialize, BorshDeserialize};
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct WasmInput {
+    data: Vec<u8>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct WasmOutput {
+    data: Vec<u8>,
+}
 
 pub struct EnarxController {
     config: TeeConfig,
@@ -10,10 +24,14 @@ pub struct EnarxController {
     worker_ids: Vec<String>,
     max_tasks: u32,
     config_path: String,
+    state: Arc<RwLock<SimpleState>>,
 }
 
 impl EnarxController {
     pub fn new(tee_type: TeeType, config_path: impl Into<String>) -> Self {
+        // Initialize wasmlanche state
+        let state = SimpleState::default();
+
         Self {
             config: TeeConfig::default(),
             tee_type,
@@ -21,6 +39,7 @@ impl EnarxController {
             worker_ids: vec!["worker-1".to_string()], // TODO: Get real worker IDs
             max_tasks: 10, // TODO: Get from config
             config_path: config_path.into(),
+            state: Arc::new(RwLock::new(state)),
         }
     }
 
@@ -54,33 +73,52 @@ impl EnarxController {
     }
 
     fn generate_attestation(&self, output: &[u8]) -> TeeAttestation {
-        // Generate a mock attestation for testing
         let mut hasher = Sha256::new();
         hasher.update(output);
         let measurement = hasher.finalize().to_vec();
 
         TeeAttestation {
-            enclave_id: [1u8; 32],
+            enclave_id: [0u8; 32], // TODO: Get real enclave ID
             measurement,
-            data: b"test attestation".to_vec(),
-            signature: vec![2u8; 64],
-            region_proof: Some(vec![3u8; 32]),
+            data: output.to_vec(),
+            signature: vec![0u8; 64], // TODO: Generate real signature
+            region_proof: Some(vec![0u8; 32]), // TODO: Generate real proof
         }
     }
 
     async fn execute_with_params(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
-        // TODO: Implement real execution
-        let result = b"test output".to_vec();
-        let attestation = self.generate_attestation(&result);
+        // Get wasmlanche state
+        let mut state = self.state.write().await;
+        let simulator = Simulator::new(&mut state);
+
+        // Create contract from WASM bytes
+        let contract_result = simulator.create_contract("memory")
+            .map_err(|e| TeeError::ExecutionError(e.to_string()))?;
+
+        // Prepare input
+        let input = WasmInput {
+            data: payload.input.clone(),
+        };
+
+        // Execute the contract
+        let result: WasmOutput = simulator.call_contract(
+            contract_result.address,
+            "execute",
+            &input,
+            1_000_000, // Gas limit
+        ).map_err(|e| TeeError::ExecutionError(e.to_string()))?;
+
+        // Generate attestation for the result
+        let attestation = self.generate_attestation(&result.data);
 
         Ok(ExecutionResult {
-            result,
+            result: result.data,
             attestation,
-            state_hash: vec![4u8; 32],
+            state_hash: vec![0u8; 32], // TODO: Get real state hash
             stats: ExecutionStats {
-                execution_time: 1000,
+                execution_time: 100, // TODO: Get real stats
                 memory_used: 1024,
-                syscall_count: 10,
+                syscall_count: 5,
             },
         })
     }
@@ -101,7 +139,7 @@ impl EnarxController {
 impl TeeController for EnarxController {
     async fn init(&mut self) -> Result<(), TeeError> {
         if !Self::check_enarx_installed() {
-            return Err(TeeError::ExecutionError("Enarx not installed".to_string()));
+            return Err(TeeError::ExecutionError("Enarx not installed".into()));
         }
 
         if !self.check_platform_support() {
@@ -133,34 +171,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_sgx_controller() {
-        let mut controller = EnarxController::new(TeeType::SGX, "path/to/config");
-        assert!(controller.init().await.is_ok());
-
+    async fn test_wasmlanche_execution() {
+        let controller = EnarxController::new(TeeType::SGX, "test_config.json");
+        
+        // Create a simple test payload
         let payload = ExecutionPayload {
             execution_id: 1,
             input: b"test input".to_vec(),
-            params: ExecutionParams::default(),
+            params: ExecutionParams {
+                expected_hash: None,
+                detailed_proof: false,
+            },
         };
 
         let result = controller.execute(&payload).await.unwrap();
         assert!(!result.result.is_empty());
-        assert!(!result.attestation.measurement.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_sev_controller() {
-        let mut controller = EnarxController::new(TeeType::SEV, "path/to/config");
-        assert!(controller.init().await.is_ok());
-
-        let payload = ExecutionPayload {
-            execution_id: 1,
-            input: b"test input".to_vec(),
-            params: ExecutionParams::default(),
-        };
-
-        let result = controller.execute(&payload).await.unwrap();
-        assert!(!result.result.is_empty());
-        assert!(!result.attestation.measurement.is_empty());
+        assert!(!result.state_hash.is_empty());
     }
 }

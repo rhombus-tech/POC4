@@ -2,21 +2,14 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let proto_file = "../../tee/proto/tee_service.proto";
-    let proto_dir = "../../tee/proto";
-
-    println!("cargo:rerun-if-changed={}", proto_file);
-    println!("cargo:rerun-if-changed={}", proto_dir);
-
+    println!("cargo:rerun-if-changed=../../tee/proto/tee_service.proto");
+    
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .file_descriptor_set_path(out_dir.join("tee_service_descriptor.bin"))
-        .out_dir(out_dir) // Let tonic-build use OUT_DIR
-        .compile(
-            &[proto_file],
-            &[proto_dir],
-        )?;
+        .compile_well_known_types(true)
+        .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .compile(&["../../tee/proto/tee_service.proto"], &["../../tee/proto"])?;
+    
     Ok(())
 }

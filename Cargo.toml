@@ -15,25 +15,25 @@ description = "Dual TEE execution system using Enarx"
 
 [workspace.dependencies]
 # Serialization
-borsh = { version = "1.5.1", features = ["derive"] }
-borsh-derive = { version = "1.5.1", features = ["borsh"] }
+borsh = { version = "1.5", features = ["derive"] }
+borsh-derive = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Async
 tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
+async-trait = "0.1.74"
+tokio-macros = "2.1"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+clap_derive = "4.4"
 
 # Error handling
-thiserror = { version = "1.0" }
+thiserror = "1.0"
 
 # Crypto
 sha2 = "0.10"
 
-# Wasmlanche dependencies
-sdk-macros = { path = "../../hyper/x/contracts/sdk-macros" }
-simulator = { path = "../../hyper/x/contracts/simulator" }
-
 # Build dependencies
 tonic-build = "0.10"
-prost-build = "0.12"

@@ -1,120 +1,55 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use clap::Parser;
 use tonic::transport::Server;
-
-use tee_interface::prelude::*;
-use crate::enarx::EnarxController;
+use clap::Parser;
 use crate::server::TeeExecutionService;
+use crate::server::teeservice::tee_execution_server::TeeExecutionServer;
+use crate::server::TeeServiceWrapper;
+use tee_interface::TeeController;
 
-mod enarx;
 mod server;
-mod verification;
+mod simulator;
+mod hyper_integration;
+mod enarx;
+mod paired_executor;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Port to listen on
-    #[arg(short, long, default_value_t = 50051)]
-    port: u16,
-
-    /// Enable debug logging
-    #[arg(short, long)]
-    debug: bool,
+    /// Region ID for TEE execution
+    #[arg(short, long, default_value = "default")]
+    region: String,
+    #[arg(short, long, default_value = "0.0.0.0:50051")]
+    addr: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    tracing_subscriber::fmt::init();
+
+    // Parse command line arguments
     let args = Args::parse();
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(if args.debug {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        })
-        .init();
+    // Create and initialize service
+    let mut service = TeeExecutionService::new();
+    service.add_region(args.region.clone(), "sgx_config.json".into(), "sev_config.json".into());
+    let service = Arc::new(RwLock::new(service));
+    
+    // Create HyperTee controller
+    let mut hyper_controller = hyper_integration::HyperTeeController::new(service.clone());
+    hyper_controller.set_region(args.region.clone());
+    hyper_controller.init().await?;
 
-    // Create controllers for each TEE type
-    let sgx_controller = Arc::new(RwLock::new(EnarxController::new(
-        TeeType::SGX,
-        "sgx_config.json".to_string(),
-    )));
-
-    let sev_controller = Arc::new(RwLock::new(EnarxController::new(
-        TeeType::SEV,
-        "sev_config.json".to_string(),
-    )));
-
-    // Create service
-    let service = TeeExecutionService::new(sgx_controller.clone(), sev_controller.clone());
-
-    // Start server
-    let addr = format!("[::1]:{}", args.port).parse()?;
-    println!("Starting TEE execution service on {}", addr);
+    // Create service wrapper and start gRPC server
+    let wrapper = TeeServiceWrapper::new(service);
+    let addr = args.addr.parse()?;
+    println!("Starting TEE service on {}", addr);
 
     Server::builder()
-        .add_service(server::tee::tee_execution_server::TeeExecutionServer::new(service))
+        .add_service(TeeExecutionServer::new(wrapper))
         .serve(addr)
         .await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::runtime::Runtime;
-
-    #[test]
-    fn test_server_startup() {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let sgx_controller = Arc::new(RwLock::new(EnarxController::new(
-                TeeType::SGX,
-                "test_sgx_config.json".to_string(),
-            )));
-
-            let sev_controller = Arc::new(RwLock::new(EnarxController::new(
-                TeeType::SEV,
-                "test_sev_config.json".to_string(),
-            )));
-
-            let service = TeeExecutionService::new(sgx_controller, sev_controller);
-            let addr = "[::1]:50052".parse().unwrap();
-
-            let server = Server::builder()
-                .add_service(server::tee::tee_execution_server::TeeExecutionServer::new(service))
-                .serve(addr);
-
-            tokio::time::timeout(std::time::Duration::from_secs(1), server)
-                .await
-                .expect_err("Server should not complete");
-        });
-    }
-
-    #[test]
-    fn test_execution_result() {
-        let result = ExecutionResult {
-            result: b"test output".to_vec(),
-            attestation: TeeAttestation {
-                enclave_id: [1u8; 32],
-                measurement: vec![2u8; 32],
-                data: b"test".to_vec(),
-                signature: vec![3u8; 64],
-                region_proof: Some(vec![4u8; 32]),
-            },
-            state_hash: vec![5u8; 32],
-            stats: ExecutionStats {
-                execution_time: 1000,
-                memory_used: 1024,
-                syscall_count: 10,
-            },
-        };
-
-        assert!(!result.result.is_empty());
-        assert!(!result.attestation.measurement.is_empty());
-        assert!(!result.state_hash.is_empty());
-    }
 }

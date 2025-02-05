@@ -1,15 +1,19 @@
 [package]
 name = "tee-interface"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
 # Core dependencies
-borsh = { version = "1.5.1", features = ["derive", "std"] }
-borsh-derive = { version = "1.5.1" }
-thiserror = { version = "1.0" }
-sha2 = { version = "0.10" }
-async-trait = { version = "0.1" }
+borsh = { version = "1.2", features = ["derive"] }
+borsh-derive = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+sha2 = "0.10"
+async-trait = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+log = "0.4"
 
 # Proc macro support
 proc-macro2 = "1.0"

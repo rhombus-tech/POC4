@@ -203,6 +203,32 @@ fn verify_result(result: &ExecutionResult) -> Result<bool, TeeError> {
     Ok(true)
 }
 
+#[no_mangle]
+pub extern "C" fn compute(input_ptr: *const u8, input_len: usize) -> i32 {
+    // Convert input to slice
+    let input = unsafe {
+        std::slice::from_raw_parts(input_ptr, input_len)
+    };
+
+    // Create engine and execute
+    let mut engine = ComputationEngine::new();
+    let payload = ExecutionPayload {
+        input: input.to_vec(),
+        ..Default::default()
+    };
+
+    // Execute and return result
+    match engine.execute(payload) {
+        Ok(result) => {
+            if result.len() != 1 {
+                return -1;
+            }
+            result[0] as i32
+        }
+        Err(_) => -1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +303,12 @@ mod tests {
         };
 
         assert!(verify_result(&result).is_ok());
+    }
+
+    #[test]
+    fn test_compute() {
+        let input = vec![1, 2, 3, 4];
+        let result = compute(input.as_ptr(), input.len());
+        assert_eq!(result, 10); // 1 + 2 + 3 + 4 = 10
     }
 }
