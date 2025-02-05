@@ -6,6 +6,7 @@ use wasmlanche::simulator::Simulator;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use borsh::{BorshSerialize, BorshDeserialize};
+use tempfile;
 
 #[derive(BorshSerialize, BorshDeserialize)]
 struct WasmInput {
@@ -84,8 +85,15 @@ impl EnarxController {
         // Get wasmlanche simulator
         let mut simulator = self.simulator.write().await;
 
-        // Create contract from WASM bytes
-        let contract_result = simulator.create_contract("memory")
+        // Create a temporary file to store the WASM code
+        let temp_dir = tempfile::tempdir()
+            .map_err(|e| TeeError::ExecutionError(e.to_string()))?;
+        let wasm_path = temp_dir.path().join("contract.wasm");
+        std::fs::write(&wasm_path, &payload.input)
+            .map_err(|e| TeeError::ExecutionError(e.to_string()))?;
+
+        // Create contract from WASM file
+        let contract_result = simulator.create_contract(wasm_path.to_str().unwrap())
             .map_err(|e| TeeError::ExecutionError(e.to_string()))?;
 
         // Prepare input
@@ -195,7 +203,8 @@ mod tests {
 
         // Get the path to the wasm module
         let mut wasm_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        wasm_path.push("../wasm-module/target/wasm32-unknown-unknown/release/wasm_module.wasm");
+        wasm_path.pop(); // Go up one level from controller to execution
+        wasm_path.push("target/wasm32-unknown-unknown/release/wasm_module.wasm");
 
         // Read the wasm module
         let wasm_bytes = fs::read(&wasm_path).expect("Failed to read WASM module");

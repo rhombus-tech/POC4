@@ -12,7 +12,7 @@ tee-interface = { path = "../interface" }
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["simulator"] }
 async-trait = { workspace = true }
 futures-util = "0.3"
-tempfile = "3.9"
+tempfile = "3.8"
 
 # CLI
 clap = { workspace = true }
