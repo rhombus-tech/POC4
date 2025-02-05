@@ -1,17 +1,19 @@
 [package]
 name = "tee-contract"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
-# Interface and serialization
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test", "bindings"] }
 tee-interface = { path = "../interface" }
-borsh = { workspace = true }
+thiserror = "1.0"
+borsh = { version = "1.5", features = ["derive"] }
+sha2 = "0.10"
 
-# Crypto
-sha2 = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
+[features]
+default = ["bindings"]
+bindings = []
 
 [dev-dependencies]
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test", "bindings"] }
+simulator = { path = "../../hyper/x/contracts/simulator" }

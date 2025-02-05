@@ -1,80 +1,101 @@
-use clap::Parser;
 use tee_interface::prelude::*;
-use std::path::PathBuf;
+use clap::{Parser, Subcommand};
+use tokio;
+use sha2::{Sha256, Digest};
 
 mod enarx;
 mod verification;
 
+use enarx::EnarxController;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Path to WASM module
-    #[arg(short, long)]
-    wasm: PathBuf,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Enable verbose output
-    #[arg(short, long)]
-    verbose: bool,
+#[derive(Subcommand)]
+enum Commands {
+    /// Execute code in TEE
+    Execute {
+        /// Path to WASM file
+        #[arg(short, long)]
+        wasm_file: String,
+        
+        /// Input data
+        #[arg(short, long)]
+        input: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    // Check platform support
-    let (sgx_supported, sev_supported) = enarx::verify_platforms()?;
-    println!("Platform support:");
-    println!("  SGX: {}", sgx_supported);
-    println!("  SEV: {}", sev_supported);
+    let mut sgx_controller = EnarxController::new(TeeType::Sgx);
+    let mut sev_controller = EnarxController::new(TeeType::Sev);
 
-    if !sgx_supported && !sev_supported {
-        eprintln!("No supported TEE platforms found");
-        std::process::exit(1);
-    }
+    // Initialize both controllers
+    sgx_controller.init().await?;
+    sev_controller.init().await?;
 
-    // Execute in both TEEs
-    let sgx_result = enarx::execute_sgx(&args.wasm).await?;
-    let sev_result = enarx::execute_sev(&args.wasm).await?;
+    match &cli.command {
+        Commands::Execute { wasm_file, input } => {
+            // Read WASM file
+            let wasm_bytes = tokio::fs::read(wasm_file)
+                .await
+                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read WASM file: {}", e))))?;
 
-    // Print attestations if verbose
-    if args.verbose {
-        println!("\nSGX Attestation:");
-        print_attestation(&sgx_result.attestations[0]);
-        println!("\nSEV Attestation:");
-        print_attestation(&sev_result.attestations[0]);
+            // Create execution payload
+            let mut hasher = Sha256::new();
+            hasher.update(&wasm_bytes);
+            let hash: [u8; 32] = hasher.finalize().into();
+
+            let payload = ExecutionPayload {
+                execution_id: 1,
+                input: input.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default(),
+                params: ExecutionParams {
+                    expected_hash: Some(hash),
+                    detailed_proof: true,
+                },
+            };
+
+            // Execute on both platforms
+            let sgx_result = sgx_controller.execute(&payload).await?;
+            let sev_result = sev_controller.execute(&payload).await?;
+
+            println!("SGX Result: {:?}", sgx_result);
+            println!("SEV Result: {:?}", sev_result);
+        }
     }
 
     Ok(())
 }
 
-fn print_attestation(attestation: &TeeAttestation) {
-    println!("  Type: {:?}", attestation.tee_type);
-    println!("  Measurement: {:?}", attestation.measurement);
-    println!("  Signature: {:?}", attestation.signature);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[tokio::test]
-    async fn test_basic_execution() {
-        // Create test WASM file
-        let wasm_path = PathBuf::from("test.wasm");
-        fs::write(&wasm_path, b"test wasm").unwrap();
+    async fn test_paired_execution() {
+        let mut sgx_controller = EnarxController::new(TeeType::Sgx);
+        let mut sev_controller = EnarxController::new(TeeType::Sev);
 
-        // Create test args
-        let args = Args {
-            wasm: wasm_path.clone(),
-            verbose: false,
+        sgx_controller.init().await.unwrap();
+        sev_controller.init().await.unwrap();
+
+        let payload = ExecutionPayload {
+            execution_id: 1,
+            input: b"test input".to_vec(),
+            params: ExecutionParams::default(),
         };
 
-        // Test execution
-        let result = enarx::execute_sgx(&args.wasm).await;
-        assert!(result.is_err()); // Should fail because we provided invalid WASM
+        let sgx_result = sgx_controller.execute(&payload).await.unwrap();
+        let sev_result = sev_controller.execute(&payload).await.unwrap();
 
-        // Cleanup
-        fs::remove_file(wasm_path).unwrap();
+        assert_eq!(sgx_result.output, sev_result.output);
+        assert_eq!(sgx_result.attestations[0].tee_type, TeeType::Sgx);
+        assert_eq!(sev_result.attestations[0].tee_type, TeeType::Sev);
     }
 }

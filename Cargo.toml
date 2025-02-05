@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "interface",
     "wasm-module",
-    "controller"
+    "controller",
+    "contract"
 ]
 
 [workspace.package]
@@ -14,8 +15,8 @@ description = "Dual TEE execution system using Enarx"
 
 [workspace.dependencies]
 # Serialization
-borsh = "0.10.3"
-borsh-derive = "0.10.3"
+borsh = { version = "1.5.1", features = ["derive"] }
+borsh-derive = "1.5.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -28,3 +29,7 @@ thiserror = "1.0"
 
 # Crypto
 sha2 = "0.10"
+
+# Wasmlanche dependencies
+sdk-macros = { path = "../../hyper/x/contracts/sdk-macros" }
+simulator = { path = "../../hyper/x/contracts/simulator" }

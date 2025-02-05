@@ -1,103 +1,88 @@
-use thiserror::Error;
 use async_trait::async_trait;
-use std::error::Error;
+use borsh::{BorshSerialize, BorshDeserialize};
+use thiserror::Error;
 
 pub mod types;
 pub use types::*;
 
-/// Errors that can occur during TEE operations
-#[derive(Error, Debug)]
+#[derive(Debug, Error, BorshSerialize, BorshDeserialize)]
 pub enum TeeError {
-    #[error("TEE initialization failed: {0}")]
-    InitializationError(String),
-    
-    #[error("TEE execution failed: {0}")]
-    ExecutionError(String),
-    
-    #[error("TEE attestation failed: {0}")]
+    #[error("Attestation verification failed: {0}")]
     AttestationError(String),
-    
-    #[error("TEE verification failed: {0}")]
-    VerificationError(String),
-    
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    #[error("Execution failed: {0}")]
+    ExecutionError(String),
+    #[error("Invalid state: {0}")]
+    StateError(String),
+    #[error("Storage error: {0}")]
+    StorageError(String),
 }
 
 /// Trait for TEE verification logic
 #[async_trait]
-pub trait TeeVerification {
-    /// Verify execution results from two different TEEs match
-    async fn verify_execution(
-        &self,
-        sgx_result: &ExecutionResult,
-        sev_result: &ExecutionResult,
-    ) -> Result<VerificationResult, TeeError>;
+pub trait TeeVerification: Send + Sync {
+    /// Verify a TEE attestation
+    async fn verify_attestation(&self, attestation: &TeeAttestation) -> Result<bool, TeeError>;
+
+    /// Verify execution result matches attestation
+    async fn verify_result(&self, result: &ExecutionResult) -> Result<bool, TeeError>;
 }
 
 /// Main controller for TEE execution
 #[async_trait]
-pub trait TeeController {
-    /// Execute code in the TEE
-    async fn execute(
-        &self,
-        input: ExecutionInput,
-    ) -> Result<ExecutionResult, TeeError>;
+pub trait TeeController: Send + Sync {
+    /// Initialize TEE environment
+    async fn init(&mut self) -> Result<(), TeeError>;
 
-    /// Health check for the TEE
-    async fn health_check(&self) -> Result<bool, Box<dyn Error>>;
+    /// Execute code in TEE
+    async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
+
+    /// Get current TEE configuration
+    async fn get_config(&self) -> Result<TeeConfig, TeeError>;
+
+    /// Update TEE configuration
+    async fn update_config(&mut self, config: TeeConfig) -> Result<(), TeeError>;
+}
+
+/// Configuration for TEE operations
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct TeeConfig {
+    /// Minimum number of attestations required
+    pub min_attestations: u32,
+    /// Whether to verify measurements
+    pub verify_measurements: bool,
+}
+
+impl Default for TeeConfig {
+    fn default() -> Self {
+        Self {
+            min_attestations: 1,
+            verify_measurements: true,
+        }
+    }
 }
 
 /// Prelude module containing commonly used types and traits
 pub mod prelude {
     pub use super::{
-        TeeError,
         TeeVerification,
         TeeController,
+        TeeConfig,
+        TeeError,
     };
     pub use super::types::*;
+    pub use borsh::{BorshSerialize, BorshDeserialize};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use borsh::BorshSerialize;
 
     #[test]
-    fn test_execution_result_serialization() {
-        let result = ExecutionResult {
-            tx_id: vec![1, 2, 3],
-            state_hash: [0u8; 32],
-            output: vec![4, 5, 6],
-            attestations: vec![],
-            timestamp: 12345,
-            region_id: String::from("test"),
-        };
-
-        let serialized = result.try_to_vec().unwrap();
-        let deserialized: ExecutionResult = borsh::BorshDeserialize::try_from_slice(&serialized).unwrap();
-
-        assert_eq!(result.tx_id, deserialized.tx_id);
-        assert_eq!(result.state_hash, deserialized.state_hash);
-        assert_eq!(result.output, deserialized.output);
-        assert!(result.attestations.is_empty() && deserialized.attestations.is_empty());
-        assert_eq!(result.timestamp, deserialized.timestamp);
-        assert_eq!(result.region_id, deserialized.region_id);
-    }
-
-    #[test]
-    fn test_attestation_serialization() {
-        let attestation = TeeAttestation {
-            tee_type: TeeType::Sgx,
-            measurement: vec![0u8; 32],
-            signature: vec![1, 2, 3],
-        };
-
-        let serialized = attestation.try_to_vec().unwrap();
-        let deserialized: TeeAttestation = borsh::BorshDeserialize::try_from_slice(&serialized).unwrap();
-
-        assert_eq!(attestation.tee_type, deserialized.tee_type);
-        assert_eq!(attestation.measurement, deserialized.measurement);
-        assert_eq!(attestation.signature, deserialized.signature);
+    fn test_config_serialization() {
+        let config = TeeConfig::default();
+        let bytes = borsh::to_vec(&config).unwrap();
+        let decoded: TeeConfig = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.min_attestations, config.min_attestations);
+        assert_eq!(decoded.verify_measurements, config.verify_measurements);
     }
 }

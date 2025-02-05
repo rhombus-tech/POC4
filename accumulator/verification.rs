@@ -3,6 +3,7 @@ use wasmlanche::{
     borsh::{BorshSerialize, BorshDeserialize}
 };
 use tee_interface::prelude::*;
+use sha2::{Sha256, Digest};
 
 state_schema! {
     /// Address of deployed accumulator contract
@@ -41,17 +42,20 @@ pub fn verify_execution(
     sgx_result: &ExecutionResult,
     sev_result: &ExecutionResult,
 ) -> Result<VerificationResult, TeeError> {
-    // Verify results match
+    // 1. Verify result hashes match
     if sgx_result.result_hash != sev_result.result_hash {
         return Err(TeeError::ResultMismatch);
     }
 
-    // Get accumulator contract
+    // 2. Verify execution stats are reasonable
+    verify_execution_stats(sgx_result, sev_result)?;
+
+    // 3. Get accumulator contract for attestation verification
     let accumulator = context.get(AccumulatorContract)?
         .ok_or(TeeError::InitializationError("Not initialized".into()))?;
 
-    // Call accumulator for verification
-    let witness_valid: bool = context.call_contract(
+    // 4. Verify attestations through accumulator contract
+    let attestation_valid = context.call_contract(
         accumulator,
         "verify_attestation",
         &(sgx_result.attestation.clone(), sev_result.attestation.clone()),
@@ -59,16 +63,74 @@ pub fn verify_execution(
         0,
     )?;
 
-    if !witness_valid {
-        return Err(TeeError::AttestationError("Invalid accumulator proof".into()));
+    if !attestation_valid {
+        return Err(TeeError::AttestationError("Attestation verification failed".into()));
     }
 
+    // 5. If state is managed in TEE, verify state consistency
+    verify_state_consistency(sgx_result, sev_result)?;
+
     Ok(VerificationResult {
-        verified: true,
-        result_hash: sgx_result.result_hash,
-        sgx_attestation: sgx_result.attestation.clone(),
-        sev_attestation: sev_result.attestation.clone(),
+        valid: true,
+        result_hash: sgx_result.result_hash.clone(),
     })
+}
+
+fn verify_execution_stats(
+    sgx_result: &ExecutionResult,
+    sev_result: &ExecutionResult,
+) -> Result<(), TeeError> {
+    // 1. Check execution times are within reasonable bounds
+    let time_diff = sgx_result.stats.execution_time.abs_diff(sev_result.stats.execution_time);
+    if time_diff > 1000 { // More than 1 second difference
+        return Err(TeeError::TimingMismatch);
+    }
+
+    // 2. Check memory usage is similar
+    let mem_diff = sgx_result.stats.memory_used.abs_diff(sev_result.stats.memory_used);
+    if mem_diff > 1024 * 1024 { // More than 1MB difference
+        return Err(TeeError::ResourceMismatch);
+    }
+
+    // 3. Check instruction counts if available
+    if let (Some(sgx_instr), Some(sev_instr)) = (
+        sgx_result.stats.instructions_executed,
+        sev_result.stats.instructions_executed
+    ) {
+        let instr_diff = sgx_instr.abs_diff(sev_instr);
+        if instr_diff > 1000 { // More than 1000 instruction difference
+            return Err(TeeError::ExecutionMismatch);
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_state_consistency(
+    sgx_result: &ExecutionResult,
+    sev_result: &ExecutionResult,
+) -> Result<(), TeeError> {
+    // 1. Verify state root hashes match
+    if sgx_result.state_root != sev_result.state_root {
+        return Err(TeeError::StateMismatch);
+    }
+
+    // 2. Verify state transition proofs
+    if !verify_state_transition(&sgx_result.state_proof) {
+        return Err(TeeError::InvalidStateTransition);
+    }
+
+    if !verify_state_transition(&sev_result.state_proof) {
+        return Err(TeeError::InvalidStateTransition);
+    }
+
+    Ok(())
+}
+
+fn verify_state_transition(proof: &StateTransitionProof) -> bool {
+    // TODO: Implement state transition verification
+    // For now just return true
+    true
 }
 
 #[cfg(test)]
@@ -120,12 +182,30 @@ mod tests {
             result_hash,
             result: vec![1],
             attestation: sgx_attestation,
+            stats: ExecutionStats {
+                execution_time: 100,
+                memory_used: 1024,
+                instructions_executed: Some(1000),
+            },
+            state_root: [4; 32],
+            state_proof: StateTransitionProof {
+                // TODO: Initialize state transition proof
+            },
         };
 
         let sev_result = ExecutionResult {
             result_hash,
             result: vec![1],
             attestation: sev_attestation,
+            stats: ExecutionStats {
+                execution_time: 100,
+                memory_used: 1024,
+                instructions_executed: Some(1000),
+            },
+            state_root: [4; 32],
+            state_proof: StateTransitionProof {
+                // TODO: Initialize state transition proof
+            },
         };
 
         // Mock accumulator verification
@@ -138,6 +218,6 @@ mod tests {
         );
 
         let result = verify_execution(ctx, &sgx_result, &sev_result).unwrap();
-        assert!(result.verified);
+        assert!(result.valid);
     }
 }

@@ -5,8 +5,8 @@ edition.workspace = true
 
 [dependencies]
 # Serialization
-borsh = "0.10.3"
-borsh-derive = "0.10.3"
+borsh = { workspace = true, features = ["derive"] }
+borsh-derive = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

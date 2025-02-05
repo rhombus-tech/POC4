@@ -7,9 +7,10 @@ edition.workspace = true
 crate-type = ["cdylib"]  # Compile as dynamic library for WASM
 
 [dependencies]
-borsh.workspace = true
-borsh-derive = "0.10.3"
+borsh = { workspace = true, features = ["derive"] }
+borsh-derive = { workspace = true }
 tee-interface = { path = "../interface" }
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
 sha2.workspace = true
 thiserror = "1.0"
 log = "0.4"

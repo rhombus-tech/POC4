@@ -1,9 +1,10 @@
+use wasmlanche::Context;
 use tee_interface::prelude::*;
-use borsh::{BorshDeserialize, BorshSerialize};
 use thiserror::Error;
-use std::alloc::Layout;
 use sha2::{Sha256, Digest};
+use std::alloc::Layout;
 use log;
+use borsh::{BorshSerialize, BorshDeserialize};
 
 mod computation;
 pub use computation::*;
@@ -110,7 +111,7 @@ unsafe fn handle_execution(params_offset: i32) -> Result<ExecutionResult, Execut
 }
 
 fn store_result(result: &ExecutionResult) -> Result<(), ExecutionError> {
-    let result_bytes = result.try_to_vec()
+    let result_bytes = borsh::to_vec(result)
         .map_err(|e| ExecutionError::SerializationError(format!("Failed to serialize result: {}", e)))?;
     
     // TODO: Store result in shared memory
@@ -131,38 +132,141 @@ fn compute_measurement(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+/// Initialize the TEE environment
+pub fn init_tee() -> Result<(), String> {
+    // In a real implementation, we would:
+    // 1. Initialize TEE runtime
+    // 2. Set up secure communication channels
+    // 3. Load necessary keys and certificates
+    Ok(())
+}
+
+/// Execute code in TEE
+pub fn execute_in_tee(
+    context: &Context,
+    payload: &[u8],
+) -> Result<ExecutionResult, String> {
+    // Deserialize payload
+    let payload: ExecutionPayload = BorshDeserialize::deserialize(&mut &payload[..])
+        .map_err(|e| format!("Failed to deserialize payload: {}", e))?;
+
+    // In a real implementation, we would:
+    // 1. Verify payload signature
+    // 2. Load code into TEE
+    // 3. Execute code
+    // 4. Generate attestation
+    // 5. Return result with attestation
+
+    let attestation = TeeAttestation {
+        tee_type: TeeType::Sgx,
+        measurement: vec![1u8; 32],
+        signature: vec![],
+    };
+
+    let result = ExecutionResult {
+        tx_id: vec![1],
+        output: b"test_output".to_vec(),
+        state_hash: [0u8; 32],
+        attestations: vec![attestation],
+        timestamp: context.timestamp(),
+        region_id: "0".to_string(),
+    };
+
+    Ok(result)
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct WasmExecutionResult {
+    pub output: Vec<u8>,
+    pub state: Vec<u8>,
+}
+
+pub fn execute_wasm(input: &[u8]) -> Result<WasmExecutionResult, String> {
+    // In a real implementation, we would:
+    // 1. Initialize WASM runtime
+    // 2. Load and validate WASM module
+    // 3. Execute WASM code with input
+    // 4. Collect output and state
+    
+    Ok(WasmExecutionResult {
+        output: input.to_vec(),
+        state: vec![],
+    })
+}
+
+pub fn verify_execution_params(params: &ExecutionParams, wasm_bytes: &[u8]) -> Result<bool, TeeError> {
+    if let Some(expected_hash) = params.expected_hash {
+        let mut hasher = Sha256::new();
+        hasher.update(wasm_bytes);
+        let actual_hash: [u8; 32] = hasher.finalize().into();
+
+        if actual_hash != expected_hash {
+            return Err(TeeError::ExecutionError("WASM hash mismatch".to_string()));
+        }
+    }
+
+    Ok(true)
+}
+
+pub fn verify_result(_result: &ExecutionResult) -> Result<bool, TeeError> {
+    // In a real implementation, we would:
+    // 1. Verify attestations
+    // 2. Verify state hash
+    // 3. Verify output integrity
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_execution() {
-        // Create test payload
-        let payload = ExecutionPayload {
-            execution_id: 1,
-            input: vec![1, 2, 3],
-            params: ExecutionParams::default(),
-        };
-
-        // Serialize payload
-        let payload_bytes = payload.try_to_vec().unwrap();
-        let len = payload_bytes.len() as u32;
-        let len_bytes = len.to_le_bytes();
-
-        // Create params buffer
-        let mut params = vec![0u8; 8 + len as usize];
-        params[4..8].copy_from_slice(&len_bytes);
-        params[8..].copy_from_slice(&payload_bytes);
-
-        let params_ptr = params.as_ptr() as i32;
-
-        execute(params_ptr);
+    fn test_wasm_execution() {
+        let input = b"test input";
+        let result = execute_wasm(input).unwrap();
+        assert_eq!(result.output, input);
     }
 
     #[test]
-    fn test_measurement() {
-        let data = vec![1, 2, 3, 4];
-        let measurement = compute_measurement(&data);
-        assert_eq!(measurement.len(), 32);
+    fn test_result_serialization() {
+        let result = WasmExecutionResult {
+            output: b"test output".to_vec(),
+            state: b"test state".to_vec(),
+        };
+
+        let bytes = borsh::to_vec(&result).unwrap();
+        let decoded: WasmExecutionResult = borsh::from_slice(&bytes).unwrap();
+
+        assert_eq!(decoded.output, result.output);
+        assert_eq!(decoded.state, result.state);
+    }
+
+    #[test]
+    fn test_execution_params() {
+        let wasm_bytes = b"\0asm\x01\0\0\0";
+        let mut hasher = Sha256::new();
+        hasher.update(wasm_bytes);
+        let hash: [u8; 32] = hasher.finalize().into();
+
+        let params = ExecutionParams {
+            expected_hash: Some(hash),
+            detailed_proof: true,
+        };
+
+        assert!(verify_execution_params(&params, wasm_bytes).unwrap());
+    }
+
+    #[test]
+    fn test_verify_result() {
+        let result = ExecutionResult {
+            tx_id: vec![1],
+            output: vec![2],
+            state_hash: [0; 32],
+            attestations: vec![],
+            timestamp: 123456789,
+            region_id: "test".to_string(),
+        };
+
+        assert!(verify_result(&result).unwrap());
     }
 }

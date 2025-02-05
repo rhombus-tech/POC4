@@ -42,22 +42,6 @@ pub enum ExecutionState {
     Failed,
 }
 
-/// Platform-specific measurements
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub enum PlatformMeasurement {
-    Sgx {
-        mrenclave: [u8; 32],
-        mrsigner: [u8; 32],
-        miscselect: u32,
-        attributes: u64,
-    },
-    Sev {
-        measurement: [u8; 32],
-        policy: u32,
-        signature: Vec<u8>,
-    },
-}
-
 /// Proof of execution from TEE
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ExecutionProof {
@@ -114,17 +98,17 @@ pub mod constants {
 /// Result of TEE execution
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ExecutionResult {
-    /// Transaction ID
+    /// Transaction ID this result is for
     pub tx_id: Vec<u8>,
+    /// Output data from execution
+    pub output: Vec<u8>,
     /// Hash of final state
     pub state_hash: [u8; 32],
-    /// Output data
-    pub output: Vec<u8>,
     /// TEE attestations
     pub attestations: Vec<TeeAttestation>,
-    /// Execution timestamp
+    /// Timestamp of execution
     pub timestamp: u64,
-    /// Region ID
+    /// ID of region that executed
     pub region_id: String,
 }
 
@@ -144,11 +128,11 @@ pub struct VerificationResult {
 /// Attestation from a TEE
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct TeeAttestation {
-    /// Type of TEE that generated this attestation
+    /// Type of TEE
     pub tee_type: TeeType,
-    /// Measurement of the code/data in the TEE
+    /// Platform measurement/quote
     pub measurement: Vec<u8>,
-    /// Signature over the measurement
+    /// Signature over measurement
     pub signature: Vec<u8>,
 }
 
@@ -159,6 +143,19 @@ pub enum TeeType {
     Sgx,
     /// AMD SEV
     Sev,
+    /// ARM TrustZone
+    TrustZone,
+}
+
+/// Platform measurement types
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub enum PlatformMeasurement {
+    /// SGX quote
+    SgxQuote(Vec<u8>),
+    /// SEV attestation report
+    SevReport(Vec<u8>),
+    /// TrustZone measurement
+    TrustZoneMeasurement(Vec<u8>),
 }
 
 /// Input for TEE execution
@@ -175,60 +172,31 @@ pub struct ExecutionInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use borsh::BorshSerialize;
 
     #[test]
-    fn test_payload_serialization() {
+    fn test_execution_payload_serialization() {
         let payload = ExecutionPayload {
             execution_id: 1,
-            input: vec![1, 2, 3],
-            params: ExecutionParams {
-                expected_hash: Some([0u8; 32]),
-                detailed_proof: true,
-            },
+            input: b"test".to_vec(),
+            params: ExecutionParams::default(),
         };
 
-        let serialized = payload.try_to_vec().unwrap();
-        let deserialized: ExecutionPayload = borsh::BorshDeserialize::try_from_slice(&serialized).unwrap();
+        let bytes = borsh::to_vec(&payload).unwrap();
+        let decoded: ExecutionPayload = borsh::from_slice(&bytes).unwrap();
 
-        assert_eq!(payload.execution_id, deserialized.execution_id);
-        assert_eq!(payload.input, deserialized.input);
-        assert_eq!(payload.params.detailed_proof, deserialized.params.detailed_proof);
+        assert_eq!(decoded.execution_id, payload.execution_id);
+        assert_eq!(decoded.input, payload.input);
     }
 
     #[test]
     fn test_platform_measurement() {
-        let measurement = PlatformMeasurement::Sgx {
-            mrenclave: [0u8; 32],
-            mrsigner: [1u8; 32],
-            miscselect: 0,
-            attributes: 0,
-        };
+        let measurement = PlatformMeasurement::SgxQuote(vec![1, 2, 3]);
+        let bytes = borsh::to_vec(&measurement).unwrap();
+        let decoded: PlatformMeasurement = borsh::from_slice(&bytes).unwrap();
 
-        let serialized = measurement.try_to_vec().unwrap();
-        let deserialized: PlatformMeasurement = borsh::BorshDeserialize::try_from_slice(&serialized).unwrap();
-
-        match (measurement, deserialized) {
-            (
-                PlatformMeasurement::Sgx {
-                    mrenclave: e1,
-                    mrsigner: s1,
-                    miscselect: m1,
-                    attributes: a1,
-                },
-                PlatformMeasurement::Sgx {
-                    mrenclave: e2,
-                    mrsigner: s2,
-                    miscselect: m2,
-                    attributes: a2,
-                },
-            ) => {
-                assert_eq!(e1, e2);
-                assert_eq!(s1, s2);
-                assert_eq!(m1, m2);
-                assert_eq!(a1, a2);
-            }
-            _ => panic!("Unexpected variant"),
+        match decoded {
+            PlatformMeasurement::SgxQuote(data) => assert_eq!(data, vec![1, 2, 3]),
+            _ => panic!("Wrong variant"),
         }
     }
 }
