@@ -15,6 +15,8 @@ pub enum TeeError {
     StateError(String),
     #[error("Storage error: {0}")]
     StorageError(String),
+    #[error("Verification failed: {0}")]
+    VerificationError(String),
 }
 
 /// Trait for TEE verification logic

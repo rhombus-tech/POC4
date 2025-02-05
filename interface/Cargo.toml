@@ -4,15 +4,21 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# Serialization
-borsh = { workspace = true, features = ["derive"] }
-borsh-derive = { workspace = true }
+# Core dependencies
+borsh = { version = "1.5.1", features = ["derive", "std"] }
+borsh-derive = { version = "1.5.1" }
+thiserror = { version = "1.0" }
+sha2 = { version = "0.10" }
+async-trait = { version = "0.1" }
 
-# Error handling
-thiserror = { workspace = true }
+# Proc macro support
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
 
-# Crypto
-sha2 = { workspace = true }
+# gRPC dependencies
+tonic = { version = "0.10", features = ["transport", "codegen"] }
+prost = "0.12"
 
-# Async
-async-trait = { workspace = true }
+[build-dependencies]
+tonic-build = { version = "0.10" }

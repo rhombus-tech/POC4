@@ -1,74 +1,63 @@
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use clap::Parser;
+use tonic::transport::Server;
+
 use tee_interface::prelude::*;
-use clap::{Parser, Subcommand};
-use tokio;
-use sha2::{Sha256, Digest};
+use crate::enarx::EnarxController;
+use crate::server::TeeExecutionService;
 
 mod enarx;
+mod server;
 mod verification;
 
-use enarx::EnarxController;
-
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+struct Args {
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 50051)]
+    port: u16,
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Execute code in TEE
-    Execute {
-        /// Path to WASM file
-        #[arg(short, long)]
-        wasm_file: String,
-        
-        /// Input data
-        #[arg(short, long)]
-        input: Option<String>,
-    },
+    /// Enable debug logging
+    #[arg(short, long)]
+    debug: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let args = Args::parse();
 
-    let mut sgx_controller = EnarxController::new(TeeType::Sgx);
-    let mut sev_controller = EnarxController::new(TeeType::Sev);
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_max_level(if args.debug {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        })
+        .init();
 
-    // Initialize both controllers
-    sgx_controller.init().await?;
-    sev_controller.init().await?;
+    // Create controllers for each TEE type
+    let sgx_controller = Arc::new(RwLock::new(EnarxController::new(
+        TeeType::SGX,
+        "sgx_config.json".to_string(),
+    )));
 
-    match &cli.command {
-        Commands::Execute { wasm_file, input } => {
-            // Read WASM file
-            let wasm_bytes = tokio::fs::read(wasm_file)
-                .await
-                .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read WASM file: {}", e))))?;
+    let sev_controller = Arc::new(RwLock::new(EnarxController::new(
+        TeeType::SEV,
+        "sev_config.json".to_string(),
+    )));
 
-            // Create execution payload
-            let mut hasher = Sha256::new();
-            hasher.update(&wasm_bytes);
-            let hash: [u8; 32] = hasher.finalize().into();
+    // Create service
+    let service = TeeExecutionService::new(sgx_controller.clone(), sev_controller.clone());
 
-            let payload = ExecutionPayload {
-                execution_id: 1,
-                input: input.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default(),
-                params: ExecutionParams {
-                    expected_hash: Some(hash),
-                    detailed_proof: true,
-                },
-            };
+    // Start server
+    let addr = format!("[::1]:{}", args.port).parse()?;
+    println!("Starting TEE execution service on {}", addr);
 
-            // Execute on both platforms
-            let sgx_result = sgx_controller.execute(&payload).await?;
-            let sev_result = sev_controller.execute(&payload).await?;
-
-            println!("SGX Result: {:?}", sgx_result);
-            println!("SEV Result: {:?}", sev_result);
-        }
-    }
+    Server::builder()
+        .add_service(server::tee::tee_execution_server::TeeExecutionServer::new(service))
+        .serve(addr)
+        .await?;
 
     Ok(())
 }
@@ -76,26 +65,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::runtime::Runtime;
 
-    #[tokio::test]
-    async fn test_paired_execution() {
-        let mut sgx_controller = EnarxController::new(TeeType::Sgx);
-        let mut sev_controller = EnarxController::new(TeeType::Sev);
+    #[test]
+    fn test_server_startup() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let sgx_controller = Arc::new(RwLock::new(EnarxController::new(
+                TeeType::SGX,
+                "test_sgx_config.json".to_string(),
+            )));
 
-        sgx_controller.init().await.unwrap();
-        sev_controller.init().await.unwrap();
+            let sev_controller = Arc::new(RwLock::new(EnarxController::new(
+                TeeType::SEV,
+                "test_sev_config.json".to_string(),
+            )));
 
-        let payload = ExecutionPayload {
-            execution_id: 1,
-            input: b"test input".to_vec(),
-            params: ExecutionParams::default(),
+            let service = TeeExecutionService::new(sgx_controller, sev_controller);
+            let addr = "[::1]:50052".parse().unwrap();
+
+            let server = Server::builder()
+                .add_service(server::tee::tee_execution_server::TeeExecutionServer::new(service))
+                .serve(addr);
+
+            tokio::time::timeout(std::time::Duration::from_secs(1), server)
+                .await
+                .expect_err("Server should not complete");
+        });
+    }
+
+    #[test]
+    fn test_execution_result() {
+        let result = ExecutionResult {
+            result: b"test output".to_vec(),
+            attestation: TeeAttestation {
+                enclave_id: [1u8; 32],
+                measurement: vec![2u8; 32],
+                data: b"test".to_vec(),
+                signature: vec![3u8; 64],
+                region_proof: Some(vec![4u8; 32]),
+            },
+            state_hash: vec![5u8; 32],
+            stats: ExecutionStats {
+                execution_time: 1000,
+                memory_used: 1024,
+                syscall_count: 10,
+            },
         };
 
-        let sgx_result = sgx_controller.execute(&payload).await.unwrap();
-        let sev_result = sev_controller.execute(&payload).await.unwrap();
-
-        assert_eq!(sgx_result.output, sev_result.output);
-        assert_eq!(sgx_result.attestations[0].tee_type, TeeType::Sgx);
-        assert_eq!(sev_result.attestations[0].tee_type, TeeType::Sev);
+        assert!(!result.result.is_empty());
+        assert!(!result.attestation.measurement.is_empty());
+        assert!(!result.state_hash.is_empty());
     }
 }

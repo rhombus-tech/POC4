@@ -1,5 +1,5 @@
 [package]
-name = "tee-wasm-module"
+name = "wasm-module"
 version.workspace = true
 edition.workspace = true
 
@@ -7,12 +7,30 @@ edition.workspace = true
 crate-type = ["cdylib"]  # Compile as dynamic library for WASM
 
 [dependencies]
-borsh = { workspace = true, features = ["derive"] }
-borsh-derive = { workspace = true }
+# Our interface
 tee-interface = { path = "../interface" }
-wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
-sha2.workspace = true
+
+# Serialization
+borsh = { version = "1.5.1", features = ["derive"] }
+borsh-derive = "1.5.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
 thiserror = "1.0"
+
+# Crypto
+sha2 = "0.10"
+
+# Logging
 log = "0.4"
+
+# Wasmlanche
+sdk-macros = { path = "../../hyper/x/contracts/sdk-macros" }
+simulator = { path = "../../hyper/x/contracts/simulator" }
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
+
+[build-dependencies]
+tonic-build = { workspace = true }
 
 [dev-dependencies]
