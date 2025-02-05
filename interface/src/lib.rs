@@ -1,3 +1,4 @@
+#[cfg(feature = "async")]
 use async_trait::async_trait;
 use borsh::{BorshSerialize, BorshDeserialize};
 use thiserror::Error;
@@ -20,29 +21,53 @@ pub enum TeeError {
 }
 
 /// Trait for TEE verification logic
-#[async_trait]
+#[cfg_attr(feature = "async", async_trait)]
 pub trait TeeVerification: Send + Sync {
     /// Verify a TEE attestation
+    #[cfg(feature = "async")]
     async fn verify_attestation(&self, attestation: &TeeAttestation) -> Result<bool, TeeError>;
+    
+    #[cfg(not(feature = "async"))]
+    fn verify_attestation(&self, attestation: &TeeAttestation) -> Result<bool, TeeError>;
 
     /// Verify execution result matches attestation
+    #[cfg(feature = "async")]
     async fn verify_result(&self, result: &ExecutionResult) -> Result<bool, TeeError>;
+
+    #[cfg(not(feature = "async"))]
+    fn verify_result(&self, result: &ExecutionResult) -> Result<bool, TeeError>;
 }
 
 /// Main controller for TEE execution
-#[async_trait]
+#[cfg_attr(feature = "async", async_trait)]
 pub trait TeeController: Send + Sync {
     /// Initialize TEE environment
+    #[cfg(feature = "async")]
     async fn init(&mut self) -> Result<(), TeeError>;
 
+    #[cfg(not(feature = "async"))]
+    fn init(&mut self) -> Result<(), TeeError>;
+
     /// Execute code in TEE
+    #[cfg(feature = "async")]
     async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
 
+    #[cfg(not(feature = "async"))]
+    fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
+
     /// Get current TEE configuration
+    #[cfg(feature = "async")]
     async fn get_config(&self) -> Result<TeeConfig, TeeError>;
 
+    #[cfg(not(feature = "async"))]
+    fn get_config(&self) -> Result<TeeConfig, TeeError>;
+
     /// Update TEE configuration
+    #[cfg(feature = "async")]
     async fn update_config(&mut self, config: TeeConfig) -> Result<(), TeeError>;
+
+    #[cfg(not(feature = "async"))]
+    fn update_config(&mut self, config: TeeConfig) -> Result<(), TeeError>;
 }
 
 /// Configuration for TEE operations

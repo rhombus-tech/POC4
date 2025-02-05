@@ -1,32 +1,31 @@
 [package]
 name = "wasm-module"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]  # Compile as dynamic library for WASM
 
 [dependencies]
-# Our interface
-tee-interface = { path = "../interface" }
-
-# Serialization
-borsh = { version = "1.5.1", features = ["derive"] }
-borsh-derive = "1.5.1"
+tee-interface = { path = "../interface", default-features = false }
+wasm-bindgen = "0.2"
+getrandom = { version = "0.2", features = ["js"] }
+log = "0.4"
+console_log = "1.0"
+console_error_panic_hook = "0.1"
+thiserror = "1.0"
+sha2 = "0.10"
+borsh = { version = "1.2", features = ["derive"] }
+borsh-derive = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Error handling
-thiserror = "1.0"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.0", features = ["sync", "macros"] }
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test"] }
 
-# Crypto
-sha2 = "0.10"
-
-# Logging
-log = "0.4"
-
-# Wasmlanche
-wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [build-dependencies]
 tonic-build = { workspace = true }

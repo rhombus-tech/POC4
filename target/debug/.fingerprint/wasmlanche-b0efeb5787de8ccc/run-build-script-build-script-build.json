@@ -1,0 +1,1 @@
+{"rustc":9935547201935341413,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[6152758420464229371,"build_script_build",false,4784255901583318331]],"local":[{"RerunIfChanged":{"output":"debug/build/wasmlanche-b0efeb5787de8ccc/output","paths":["../../target/debug/libsimulator.a"]}}],"rustflags":[],"metadata":0,"config":0,"compile_kind":0}

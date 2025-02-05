@@ -11,8 +11,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 sha2 = "0.10"
-async-trait = "0.1"
-tokio = { version = "1.0", features = ["full"] }
+async-trait = { version = "0.1", optional = true }
 log = "0.4"
 
 # Proc macro support
@@ -20,9 +19,14 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 
-# gRPC dependencies
-tonic = { version = "0.10", features = ["transport", "codegen"] }
-prost = "0.12"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.0", features = ["sync", "macros"], optional = true }
+tonic = { version = "0.10", features = ["transport", "codegen"], optional = true }
+prost = { version = "0.12", optional = true }
+
+[features]
+default = ["async"]
+async = ["tokio", "async-trait", "tonic", "prost"]
 
 [build-dependencies]
 tonic-build = { version = "0.10" }

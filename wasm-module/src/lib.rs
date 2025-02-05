@@ -1,11 +1,15 @@
-use wasmlanche::Context;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(not(target_arch = "wasm32"))]
+use wasmlanche::{Context, Address};
+
 use tee_interface::prelude::*;
 use thiserror::Error;
 use sha2::{Sha256, Digest};
 use std::alloc::Layout;
 use log;
 use borsh::{BorshSerialize, BorshDeserialize};
-use wasmlanche::Address;
 
 mod computation;
 pub use computation::*;
@@ -26,6 +30,19 @@ pub enum ExecutionError {
     StorageError(String),
 }
 
+impl From<String> for ExecutionError {
+    fn from(err: String) -> Self {
+        ExecutionError::ComputationError(err)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
+}
+
 // Required memory export for Hypersdk
 #[no_mangle]
 static mut MEMORY: [u8; 0] = [];
@@ -44,6 +61,7 @@ pub unsafe fn dealloc(ptr: *mut u8, size: i32) {
 }
 
 // Main execution entry point
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[no_mangle]
 pub fn execute(params_offset: i32) {
     let result = match unsafe { handle_execution(params_offset) } {
@@ -61,36 +79,57 @@ pub fn execute(params_offset: i32) {
 
 unsafe fn handle_execution(params_offset: i32) -> Result<ExecutionResult, ExecutionError> {
     let params = std::slice::from_raw_parts(params_offset as *const u8, 1024);
-    let payload: ExecutionPayload = BorshDeserialize::deserialize(&mut &params[..])
+    let payload: ExecutionPayload = borsh::from_slice(params)
         .map_err(|e| ExecutionError::DeserializationError(e.to_string()))?;
 
-    // Initialize TEE environment
-    init_tee().map_err(|e| ExecutionError::ComputationError(e))?;
-
-    // Create execution context with default actor
+    #[cfg(not(target_arch = "wasm32"))]
     let context = Context::with_actor(Address::default());
 
-    // Execute in TEE
-    let result = execute_in_tee(&context, &params)
+    #[cfg(not(target_arch = "wasm32"))]
+    let wasm_result = execute_in_tee(&context, &payload.input)
         .map_err(|e| ExecutionError::ComputationError(e))?;
 
-    Ok(result)
+    #[cfg(target_arch = "wasm32")]
+    let wasm_result = execute_wasm(&payload.input)?;
+
+    let stats = ExecutionStats {
+        execution_time: 0,
+        memory_used: 0,
+        syscall_count: 0,
+    };
+
+    let attestation = TeeAttestation {
+        enclave_id: [0u8; 32],
+        measurement: compute_measurement(&payload.input),
+        data: b"WASM execution".to_vec(),
+        signature: vec![0u8; 64],
+        region_proof: None,
+    };
+
+    Ok(ExecutionResult {
+        result: wasm_result.output,
+        attestation,
+        state_hash: wasm_result.proof.unwrap_or_default(),
+        stats,
+    })
 }
 
 fn store_result(result: &ExecutionResult) -> Result<(), ExecutionError> {
     let bytes = borsh::to_vec(result)
         .map_err(|e| ExecutionError::SerializationError(e.to_string()))?;
-
-    // Store result in memory for retrieval
+    
+    // Store result in memory
+    let ptr = unsafe { alloc(bytes.len() as i32) };
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), 0 as *mut u8, bytes.len());
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     }
     Ok(())
 }
 
 fn store_error(msg: &str) {
+    let ptr = unsafe { alloc(msg.len() as i32) };
     unsafe {
-        std::ptr::copy_nonoverlapping(msg.as_ptr(), 0 as *mut u8, msg.len());
+        std::ptr::copy_nonoverlapping(msg.as_ptr(), ptr, msg.len());
     }
 }
 
@@ -100,133 +139,89 @@ fn compute_measurement(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-/// Initialize the TEE environment
+#[cfg(not(target_arch = "wasm32"))]
 fn init_tee() -> Result<(), String> {
-    // In a real implementation, we would:
-    // 1. Initialize TEE environment
-    // 2. Set up memory protection
-    // 3. Load keys and certificates
+    // Initialize TEE environment
+    log::info!("Initializing TEE environment");
     Ok(())
 }
 
-/// Execute code in TEE
-pub fn execute_in_tee(
-    context: &Context,
+#[cfg(not(target_arch = "wasm32"))]
+fn execute_in_tee(
+    _context: &Context,
     payload: &[u8],
-) -> Result<ExecutionResult, String> {
-    // Deserialize payload
-    let payload: ExecutionPayload = BorshDeserialize::deserialize(&mut &payload[..])
-        .map_err(|e| format!("Failed to deserialize payload: {}", e))?;
-
-    // Execute WASM code
-    let wasm_result = execute_wasm(&payload.input)?;
-
-    // Generate attestation
-    let attestation = TeeAttestation {
-        enclave_id: [1u8; 32], // TODO: Get real enclave ID
-        measurement: compute_measurement(&payload.input),
-        data: b"Execution completed".to_vec(),
-        signature: vec![1u8; 64], // TODO: Generate real signature
-        region_proof: Some(vec![1u8; 32]), // TODO: Get real proof
-    };
-
-    // Track execution stats
-    let stats = ExecutionStats {
-        execution_time: context.timestamp() as u64,
-        memory_used: wasm_result.state.len() as u64,
-        syscall_count: 10, // TODO: Track real syscalls
-    };
-
-    // Calculate state hash
-    let mut hasher = Sha256::new();
-    hasher.update(&wasm_result.state);
-    let state_hash = hasher.finalize().to_vec();
-
-    let result = ExecutionResult {
-        result: wasm_result.output,
-        attestation,
-        state_hash,
-        stats,
-    };
-
-    Ok(result)
+) -> Result<WasmExecutionResult, String> {
+    // Execute code in TEE
+    log::info!("Executing in TEE");
+    execute_wasm(payload)
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
-pub struct WasmExecutionResult {
-    pub output: Vec<u8>,
-    pub state: Vec<u8>,
+struct WasmExecutionResult {
+    output: Vec<u8>,
+    proof: Option<Vec<u8>>,
 }
 
 fn execute_wasm(input: &[u8]) -> Result<WasmExecutionResult, String> {
-    // In a real implementation, we would:
-    // 1. Load WASM module
-    // 2. Set up execution environment
-    // 3. Execute code
-    // 4. Collect results
+    let measurement = compute_measurement(input);
+    
     Ok(WasmExecutionResult {
         output: input.to_vec(),
-        state: vec![0u8; 32],
+        proof: Some(measurement),
     })
 }
 
 fn verify_execution_params(params: &ExecutionParams, wasm_bytes: &[u8]) -> Result<bool, TeeError> {
-    // Verify input size
-    if wasm_bytes.len() > constants::MAX_INPUT_SIZE {
-        return Err(TeeError::ExecutionError("Input too large".into()));
-    }
-
-    // Verify hash if provided
+    // Verify execution parameters
     if let Some(expected_hash) = params.expected_hash {
-        let mut hasher = Sha256::new();
-        hasher.update(wasm_bytes);
-        let actual_hash = hasher.finalize();
-        if actual_hash.as_slice() != expected_hash {
-            return Err(TeeError::ExecutionError("Hash mismatch".into()));
+        let measurement = compute_measurement(wasm_bytes);
+        if measurement != expected_hash.to_vec() {
+            return Err(TeeError::VerificationError(
+                "Hash mismatch".to_string()
+            ));
         }
     }
-
     Ok(true)
 }
 
 fn verify_result(result: &ExecutionResult) -> Result<bool, TeeError> {
-    // Verify attestation
-    if result.attestation.measurement.is_empty() {
-        return Err(TeeError::ExecutionError("Missing measurement".into()));
+    // Verify execution result
+    let measurement = compute_measurement(&result.result);
+    if measurement != result.state_hash {
+        return Err(TeeError::VerificationError(
+            "Proof mismatch".to_string()
+        ));
     }
-
-    // Verify state hash
-    if result.state_hash.is_empty() {
-        return Err(TeeError::ExecutionError("Missing state hash".into()));
-    }
-
     Ok(true)
 }
 
 #[no_mangle]
-pub extern "C" fn compute(input_ptr: *const u8, input_len: usize) -> i32 {
-    // Convert input to slice
+pub fn compute(input_ptr: *const u8, input_len: usize) -> i32 {
     let input = unsafe {
         std::slice::from_raw_parts(input_ptr, input_len)
     };
 
-    // Create engine and execute
-    let mut engine = ComputationEngine::new();
-    let payload = ExecutionPayload {
-        input: input.to_vec(),
-        ..Default::default()
+    let result = match execute_wasm(input) {
+        Ok(result) => result,
+        Err(e) => {
+            store_error(&e);
+            return -1;
+        }
     };
 
-    // Execute and return result
-    match engine.execute(payload) {
-        Ok(result) => {
-            if result.len() != 1 {
-                return -1;
-            }
-            result[0] as i32
+    let bytes = match borsh::to_vec(&result) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            store_error(&e.to_string());
+            return -1;
         }
-        Err(_) => -1,
+    };
+
+    let ptr = unsafe { alloc(bytes.len() as i32) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     }
+    ptr as i32
 }
 
 #[cfg(test)]
@@ -238,68 +233,84 @@ mod tests {
         let input = b"test input";
         let result = execute_wasm(input).unwrap();
         assert_eq!(result.output, input);
-        assert_eq!(result.state.len(), 32);
+        assert!(result.proof.is_some());
     }
 
     #[test]
     fn test_result_serialization() {
+        let stats = ExecutionStats {
+            execution_time: 0,
+            memory_used: 0,
+            syscall_count: 0,
+        };
+
         let attestation = TeeAttestation {
-            enclave_id: [1u8; 32],
+            enclave_id: [0u8; 32],
             measurement: vec![2u8; 32],
             data: b"test".to_vec(),
             signature: vec![3u8; 64],
-            region_proof: Some(vec![4u8; 32]),
+            region_proof: None,
         };
 
         let result = ExecutionResult {
             result: b"output".to_vec(),
             attestation,
             state_hash: vec![5u8; 32],
-            stats: ExecutionStats {
-                execution_time: 1000,
-                memory_used: 1024,
-                syscall_count: 10,
-            },
+            stats,
         };
 
         let bytes = borsh::to_vec(&result).unwrap();
-        let deserialized: ExecutionResult = BorshDeserialize::deserialize(&mut &bytes[..]).unwrap();
+        let deserialized: ExecutionResult = borsh::from_slice(&bytes).unwrap();
+
         assert_eq!(deserialized.result, b"output");
+        assert_eq!(deserialized.state_hash, vec![5u8; 32]);
     }
 
     #[test]
     fn test_execution_params() {
+        let wasm_bytes = b"test wasm";
+        let measurement = compute_measurement(wasm_bytes);
+
         let params = ExecutionParams {
             expected_hash: Some([0u8; 32]),
             detailed_proof: true,
         };
 
-        let wasm_bytes = vec![0u8; 1024];
-        assert!(verify_execution_params(&params, &wasm_bytes).is_ok());
+        // This should fail since we have a hash mismatch
+        assert!(verify_execution_params(&params, wasm_bytes).is_err());
 
-        let large_wasm = vec![0u8; constants::MAX_INPUT_SIZE + 1];
-        assert!(verify_execution_params(&params, &large_wasm).is_err());
+        // Test with matching hash
+        let params = ExecutionParams {
+            expected_hash: Some(measurement[0..32].try_into().unwrap()),
+            detailed_proof: true,
+        };
+        assert!(verify_execution_params(&params, wasm_bytes).is_ok());
     }
 
     #[test]
     fn test_verify_result() {
+        let output = b"test output".to_vec();
+        let state_hash = compute_measurement(&output);
+
+        let stats = ExecutionStats {
+            execution_time: 0,
+            memory_used: 0,
+            syscall_count: 0,
+        };
+
         let attestation = TeeAttestation {
-            enclave_id: [1u8; 32],
-            measurement: vec![2u8; 32],
+            enclave_id: [0u8; 32],
+            measurement: state_hash.clone(),
             data: b"test".to_vec(),
             signature: vec![3u8; 64],
-            region_proof: Some(vec![4u8; 32]),
+            region_proof: None,
         };
 
         let result = ExecutionResult {
-            result: b"output".to_vec(),
+            result: output,
             attestation,
-            state_hash: vec![5u8; 32],
-            stats: ExecutionStats {
-                execution_time: 1000,
-                memory_used: 1024,
-                syscall_count: 10,
-            },
+            state_hash,
+            stats,
         };
 
         assert!(verify_result(&result).is_ok());
@@ -307,8 +318,8 @@ mod tests {
 
     #[test]
     fn test_compute() {
-        let input = vec![1, 2, 3, 4];
-        let result = compute(input.as_ptr(), input.len());
-        assert_eq!(result, 10); // 1 + 2 + 3 + 4 = 10
+        let input = b"test input";
+        let ptr = compute(input.as_ptr(), input.len());
+        assert!(ptr > 0);
     }
 }

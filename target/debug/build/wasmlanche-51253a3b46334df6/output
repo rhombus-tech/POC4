@@ -1,0 +1,3 @@
+cargo:rustc-link-search=native=../../target/debug
+cargo:rustc-link-lib=dylib=simulator
+cargo:rerun-if-changed=../../target/debug/libsimulator.dylib

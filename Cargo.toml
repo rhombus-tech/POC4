@@ -35,5 +35,9 @@ thiserror = "1.0"
 # Crypto
 sha2 = "0.10"
 
+# gRPC
+tonic = { version = "0.10", features = ["transport"] }
+prost = "0.12"
+
 # Build dependencies
 tonic-build = "0.10"

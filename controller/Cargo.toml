@@ -5,23 +5,23 @@ edition = "2021"
 
 [dependencies]
 # Internal dependencies
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
 tee-interface = { path = "../interface" }
-hyper = { path = "../hyper" }
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["simulator"] }
-
-# Async
-tokio = { version = "1.0", features = ["full", "macros"] }
-async-trait = "0.1"
+async-trait = { workspace = true }
+futures-util = "0.3"
+tempfile = "3.9"
 
 # CLI
-clap = { version = "4.0", features = ["derive"] }
-clap_derive = "4.0"
+clap = { workspace = true }
 
 # Serialization
-borsh = { version = "1.2", features = ["derive"] }
+borsh = { workspace = true }
 borsh-derive = "1.2"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { workspace = true }
 
 # Error handling
 thiserror = "1.0"
@@ -32,16 +32,9 @@ sha2 = "0.10"
 # Time
 chrono = "0.4"
 
-# Temporary files
-tempfile = "3.8"
-
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
-# gRPC
-tonic = { version = "0.10", features = ["transport"] }
-prost = "0.12"
-
 [build-dependencies]
-tonic-build = { version = "0.10", features = ["prost"] }
+tonic-build = { workspace = true }

@@ -1,6 +1,3 @@
-use std::env;
-use std::path::PathBuf;
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=../../tee/proto/tee_service.proto");
     
