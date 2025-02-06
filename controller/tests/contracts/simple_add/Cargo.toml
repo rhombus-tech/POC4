@@ -1,0 +1,23 @@
+[package]
+name = "simple_add"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasmlanche = { path = "../../../../../hyper/x/contracts/wasmlanche" }
+borsh = { version = "1.5", default-features = false, features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wee_alloc = "0.4.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=32768"]

@@ -26,7 +26,7 @@ fn convert_attestation(att: &tee_interface::TeeAttestation) -> TeeAttestation {
 #[derive(Default)]
 pub struct TeeExecutionService {
     pub regions: HashMap<String, (String, String)>, // region_id -> (sgx_config, sev_config)
-    executors: HashMap<String, Arc<TeeExecutorPair>>, // region_id -> executor pair
+    executors: HashMap<String, Arc<RwLock<TeeExecutorPair>>>, // region_id -> executor pair
 }
 
 impl TeeExecutionService {
@@ -39,18 +39,19 @@ impl TeeExecutionService {
 
     pub fn add_region(&mut self, region_id: String, sgx_config: String, sev_config: String) {
         self.regions.insert(region_id.clone(), (sgx_config.clone(), sev_config.clone()));
-        let executor = Arc::new(TeeExecutorPair::new(region_id.clone(), sgx_config, sev_config));
+        let executor = Arc::new(RwLock::new(TeeExecutorPair::new(region_id.clone(), sgx_config, sev_config)));
         self.executors.insert(region_id, executor);
     }
 
     pub async fn init(&mut self) -> Result<(), TeeError> {
         for executor in self.executors.values() {
+            let mut executor = executor.write().await;
             executor.init().await?;
         }
         Ok(())
     }
 
-    pub fn get_executor(&self, region_id: &str) -> Option<Arc<TeeExecutorPair>> {
+    pub fn get_executor(&self, region_id: &str) -> Option<Arc<RwLock<TeeExecutorPair>>> {
         self.executors.get(region_id).cloned()
     }
 }
@@ -90,6 +91,7 @@ impl TeeExecution for TeeExecutionService {
         };
 
         // Execute in paired TEEs
+        let mut executor = executor.write().await;
         let result = executor.execute(&payload)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -133,6 +135,7 @@ impl TeeExecution for TeeExecutionService {
             .ok_or_else(|| Status::not_found(format!("Region {} not found", req.region_id)))?;
 
         // Get attestations from both TEEs
+        let mut executor = executor.write().await;
         let (sgx_att, sev_att) = executor.get_attestations()
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -162,8 +165,38 @@ impl TeeExecution for TeeServiceWrapper {
         &self,
         request: Request<ExecutionRequest>,
     ) -> Result<Response<ExecutionResult>, Status> {
-        let service = self.service.read().await;
-        service.execute(request).await
+        let request = request.into_inner();
+        let payload = ExecutionPayload {
+            execution_id: request.id_to.parse::<u64>()
+                .map_err(|e| Status::invalid_argument(format!("Invalid execution ID: {}", e)))?,
+            input: request.parameters,
+            params: ExecutionParams {
+                expected_hash: if request.expected_hash.is_empty() {
+                    None
+                } else {
+                    // Convert Vec<u8> to [u8; 32]
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(&request.expected_hash);
+                    Some(hash)
+                },
+                detailed_proof: request.detailed_proof,
+                function_call: request.function_call,
+            },
+        };
+
+        // Execute payload
+        let mut service = self.service.write().await;
+        let executor = service.get_executor(&request.region_id)
+            .ok_or_else(|| Status::not_found(format!("Region {} not found", request.region_id)))?;
+        let mut executor = executor.write().await;
+        let result = executor.execute(&payload)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Convert result to response
+        let proto_result = to_proto_result(result.sgx);  // Use the SGX result
+
+        Ok(Response::new(proto_result))
     }
 
     async fn get_regions(

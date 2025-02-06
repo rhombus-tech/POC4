@@ -12,6 +12,7 @@ mod simulator;
 mod hyper_integration;
 mod enarx;
 mod paired_executor;
+mod proto;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -33,14 +34,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and initialize service
     let mut service = TeeExecutionService::new();
+    service.add_region(
+        "default".to_string(),
+        "sgx_config".to_string(),
+        "sev_config".to_string(),
+    );
     service.add_region(args.region.clone(), "sgx_config.json".into(), "sev_config.json".into());
+    service.init().await?;
     let service = Arc::new(RwLock::new(service));
     
-    // Create HyperTee controller
-    let mut hyper_controller = hyper_integration::HyperTeeController::new(service.clone());
-    hyper_controller.set_region(args.region.clone());
-    hyper_controller.init().await?;
-
     // Create service wrapper and start gRPC server
     let wrapper = TeeServiceWrapper::new(service);
     let addr = args.addr.parse()?;

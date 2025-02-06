@@ -1,3 +1,0 @@
-cargo:rerun-if-changed=../../tee/proto/tee_service.proto
-cargo:rerun-if-changed=../../tee/proto/tee_service.proto
-cargo:rerun-if-changed=../../tee/proto

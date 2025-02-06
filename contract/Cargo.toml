@@ -3,6 +3,9 @@ name = "tee-contract"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test", "bindings"] }
 tee-interface = { path = "../interface" }
@@ -12,8 +15,9 @@ sha2 = "0.10"
 
 [features]
 default = ["bindings"]
-bindings = []
+bindings = ["wasmlanche/bindings"]
 
 [dev-dependencies]
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test", "bindings"] }
 simulator = { path = "../../hyper/x/contracts/simulator" }
+tokio = { version = "1.0", features = ["full", "test-util", "macros"] }

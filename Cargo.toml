@@ -4,8 +4,11 @@ members = [
     "interface",
     "wasm-module",
     "controller",
-    "contract"
+    "contract",
+    "controller/src/bin/wasm_module",
+    "controller/tests/contracts/simple_add"
 ]
+exclude = []
 
 [workspace.package]
 version = "0.1.0"
@@ -41,3 +44,9 @@ prost = "0.12"
 
 # Build dependencies
 tonic-build = "0.10"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

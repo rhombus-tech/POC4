@@ -5,21 +5,24 @@ edition = "2021"
 
 [dependencies]
 # Internal dependencies
-tokio = { workspace = true }
-tonic = { workspace = true }
+tokio = { version = "1.36.0", features = ["full"] }
+tonic = "0.10.2"
 prost = { workspace = true }
 tee-interface = { path = "../interface" }
-wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["simulator"] }
-async-trait = { workspace = true }
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
+async-trait = "0.1.77"
+futures = "0.3"
 futures-util = "0.3"
 tempfile = "3.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["std", "simulator", "bindings"] }
 
 # CLI
 clap = { workspace = true }
 
 # Serialization
-borsh = { workspace = true }
-borsh-derive = "1.2"
+borsh = { version = "1.2", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
 
@@ -38,3 +41,7 @@ tracing-subscriber = "0.3"
 
 [build-dependencies]
 tonic-build = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1.36.0", features = ["full", "test-util"] }
+simple_add = { path = "tests/contracts/simple_add" }

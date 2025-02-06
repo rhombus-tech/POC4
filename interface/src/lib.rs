@@ -1,21 +1,21 @@
+use thiserror::Error;
+
 #[cfg(feature = "async")]
 use async_trait::async_trait;
-use borsh::{BorshSerialize, BorshDeserialize};
-use thiserror::Error;
 
 pub mod types;
 pub use types::*;
 
-#[derive(Debug, Error, BorshSerialize, BorshDeserialize)]
+#[derive(Error, Debug)]
 pub enum TeeError {
-    #[error("Attestation verification failed: {0}")]
-    AttestationError(String),
-    #[error("Execution failed: {0}")]
+    #[error("Failed to initialize TEE: {0}")]
+    InitializationError(String),
+    #[error("Failed to execute in TEE: {0}")]
     ExecutionError(String),
-    #[error("Invalid state: {0}")]
-    StateError(String),
-    #[error("Storage error: {0}")]
-    StorageError(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+    #[error("Invalid attestation: {0}")]
+    InvalidAttestation(String),
     #[error("Verification failed: {0}")]
     VerificationError(String),
 }
@@ -30,74 +30,61 @@ pub trait TeeVerification: Send + Sync {
     #[cfg(not(feature = "async"))]
     fn verify_attestation(&self, attestation: &TeeAttestation) -> Result<bool, TeeError>;
 
-    /// Verify execution result matches attestation
+    /// Verify multiple TEE attestations
     #[cfg(feature = "async")]
-    async fn verify_result(&self, result: &ExecutionResult) -> Result<bool, TeeError>;
+    async fn verify_attestations(&self, attestations: &[TeeAttestation]) -> Result<bool, TeeError>;
 
     #[cfg(not(feature = "async"))]
-    fn verify_result(&self, result: &ExecutionResult) -> Result<bool, TeeError>;
+    fn verify_attestations(&self, attestations: &[TeeAttestation]) -> Result<bool, TeeError>;
 }
 
 /// Main controller for TEE execution
 #[cfg_attr(feature = "async", async_trait)]
 pub trait TeeController: Send + Sync {
-    /// Initialize TEE environment
+    /// Initialize the TEE controller
     #[cfg(feature = "async")]
     async fn init(&mut self) -> Result<(), TeeError>;
-
+    
     #[cfg(not(feature = "async"))]
     fn init(&mut self) -> Result<(), TeeError>;
 
-    /// Execute code in TEE
+    /// Execute a payload in the TEE
     #[cfg(feature = "async")]
-    async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
-
+    async fn execute(&mut self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
+    
     #[cfg(not(feature = "async"))]
-    fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
+    fn execute(&mut self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError>;
 
-    /// Get current TEE configuration
+    /// Get the current configuration
     #[cfg(feature = "async")]
     async fn get_config(&self) -> Result<TeeConfig, TeeError>;
-
+    
     #[cfg(not(feature = "async"))]
     fn get_config(&self) -> Result<TeeConfig, TeeError>;
 
-    /// Update TEE configuration
+    /// Update the configuration
     #[cfg(feature = "async")]
-    async fn update_config(&mut self, config: TeeConfig) -> Result<(), TeeError>;
+    async fn update_config(&mut self, new_config: TeeConfig) -> Result<(), TeeError>;
+    
+    #[cfg(not(feature = "async"))]
+    fn update_config(&mut self, new_config: TeeConfig) -> Result<(), TeeError>;
+
+    /// Get attestations from the TEE
+    #[cfg(feature = "async")]
+    async fn get_attestations(&self) -> Result<Vec<TeeAttestation>, TeeError>;
 
     #[cfg(not(feature = "async"))]
-    fn update_config(&mut self, config: TeeConfig) -> Result<(), TeeError>;
-}
-
-/// Configuration for TEE operations
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct TeeConfig {
-    /// Minimum number of attestations required
-    pub min_attestations: u32,
-    /// Whether to verify measurements
-    pub verify_measurements: bool,
-}
-
-impl Default for TeeConfig {
-    fn default() -> Self {
-        Self {
-            min_attestations: 1,
-            verify_measurements: true,
-        }
-    }
+    fn get_attestations(&self) -> Result<Vec<TeeAttestation>, TeeError>;
 }
 
 /// Prelude module containing commonly used types and traits
 pub mod prelude {
     pub use super::{
-        TeeVerification,
         TeeController,
-        TeeConfig,
+        TeeVerification,
         TeeError,
     };
-    pub use super::types::*;
-    pub use borsh::{BorshSerialize, BorshDeserialize};
+    pub use crate::types::*;
 }
 
 #[cfg(test)]
@@ -106,10 +93,23 @@ mod tests {
 
     #[test]
     fn test_config_serialization() {
-        let config = TeeConfig::default();
-        let bytes = borsh::to_vec(&config).unwrap();
-        let decoded: TeeConfig = borsh::from_slice(&bytes).unwrap();
+        let config = TeeConfig {
+            min_attestations: 2,
+            verify_measurements: true,
+            max_input_size: 2048 * 1024,
+            max_memory_size: 32 * 1024 * 1024,
+            max_execution_time: 10000,
+            max_gas: 2_000_000,
+        };
+
+        let encoded = borsh::to_vec(&config).unwrap();
+        let decoded: TeeConfig = borsh::from_slice(&encoded).unwrap();
+
         assert_eq!(decoded.min_attestations, config.min_attestations);
         assert_eq!(decoded.verify_measurements, config.verify_measurements);
+        assert_eq!(decoded.max_input_size, config.max_input_size);
+        assert_eq!(decoded.max_memory_size, config.max_memory_size);
+        assert_eq!(decoded.max_execution_time, config.max_execution_time);
+        assert_eq!(decoded.max_gas, config.max_gas);
     }
 }

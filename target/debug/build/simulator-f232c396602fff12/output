@@ -2,7 +2,7 @@ cargo:rerun-if-changed=/Users/talzisckind/Downloads/aristo-fresh/hyper/x/contrac
 cargo:rerun-if-changed=/Users/talzisckind/Downloads/aristo-fresh/hyper/x/contracts/simulator/ffi
 cargo:rerun-if-changed=/Users/talzisckind/Downloads/aristo-fresh/hyper/x/contracts/simulator/common
 cargo:rerun-if-changed=/Users/talzisckind/Downloads/aristo-fresh/hyper/x/contracts/simulator/src
-cargo::rustc-link-search=native=/Users/talzisckind/Downloads/aristo-fresh/hyper/target/debug
+cargo:rustc-link-search=native=/Users/talzisckind/Downloads/aristo-fresh/hyper/target/debug
 cargo:rustc-link-lib=static=simulator
 cargo:rerun-if-env-changed=TARGET
 cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_aarch64-apple-darwin

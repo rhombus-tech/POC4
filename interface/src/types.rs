@@ -29,6 +29,8 @@ pub struct ExecutionParams {
     pub expected_hash: Option<[u8; 32]>,
     /// Whether to include detailed proof
     pub detailed_proof: bool,
+    /// Function to call in the WASM module
+    pub function_call: String,
 }
 
 impl Default for ExecutionParams {
@@ -36,6 +38,7 @@ impl Default for ExecutionParams {
         Self {
             expected_hash: None,
             detailed_proof: false,
+            function_call: "execute".to_string(),
         }
     }
 }
@@ -67,17 +70,29 @@ pub struct ExecutionProof {
 /// Configuration for TEE execution
 #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TeeConfig {
-    /// Maximum input size in bytes
+    /// Minimum number of attestations required
+    pub min_attestations: u32,
+    /// Whether to verify measurements
+    pub verify_measurements: bool,
+    /// Maximum input size
     pub max_input_size: usize,
-    /// Maximum execution time in seconds
+    /// Maximum memory size
+    pub max_memory_size: usize,
+    /// Maximum execution time in milliseconds
     pub max_execution_time: u64,
+    /// Maximum gas limit
+    pub max_gas: u64,
 }
 
 impl Default for TeeConfig {
     fn default() -> Self {
         Self {
+            min_attestations: 1,
+            verify_measurements: true,
             max_input_size: 1024 * 1024, // 1MB
-            max_execution_time: 60,       // 1 minute
+            max_memory_size: 1024 * 1024 * 1024, // 1GB
+            max_execution_time: 60 * 1000, // 1 minute
+            max_gas: 1000000,
         }
     }
 }
@@ -96,6 +111,8 @@ pub struct ExecutionStats {
 /// Information about a TEE region
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct RegionInfo {
+    /// Region identifier
+    pub id: String,
     /// List of worker IDs in this region
     pub worker_ids: Vec<String>,
     /// Maximum number of concurrent tasks
@@ -151,6 +168,10 @@ pub struct TeeAttestation {
     pub signature: Vec<u8>,
     /// Optional proof of region membership
     pub region_proof: Option<Vec<u8>>,
+    /// Timestamp of attestation
+    pub timestamp: u64,
+    /// Type of enclave
+    pub enclave_type: TeeType,
 }
 
 /// Type of TEE environment
@@ -185,6 +206,7 @@ mod tests {
             params: ExecutionParams {
                 expected_hash: Some([0; 32]),
                 detailed_proof: true,
+                function_call: "test".to_string(),
             },
         };
 
@@ -195,6 +217,7 @@ mod tests {
         assert_eq!(deserialized.input, payload.input);
         assert_eq!(deserialized.params.expected_hash, payload.params.expected_hash);
         assert_eq!(deserialized.params.detailed_proof, payload.params.detailed_proof);
+        assert_eq!(deserialized.params.function_call, payload.params.function_call);
     }
 
     #[test]
@@ -205,6 +228,8 @@ mod tests {
             data: vec![4, 5, 6],
             signature: vec![7, 8, 9],
             region_proof: Some(vec![10, 11, 12]),
+            timestamp: 123,
+            enclave_type: TeeType::SGX,
         };
 
         let serialized = borsh::to_vec(&attestation).unwrap();
@@ -215,5 +240,7 @@ mod tests {
         assert_eq!(deserialized.data, attestation.data);
         assert_eq!(deserialized.signature, attestation.signature);
         assert_eq!(deserialized.region_proof, attestation.region_proof);
+        assert_eq!(deserialized.timestamp, attestation.timestamp);
+        assert_eq!(deserialized.enclave_type, attestation.enclave_type);
     }
 }
