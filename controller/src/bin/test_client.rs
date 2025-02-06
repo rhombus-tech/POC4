@@ -3,25 +3,33 @@ use std::error::Error;
 use tee_controller::server::teeservice::tee_execution_client::TeeExecutionClient;
 use tee_controller::server::teeservice::ExecutionRequest;
 
+// Mock WASM module header - this is just for testing, not a real WASM module
+const MOCK_WASM: &[u8] = &[0x00, 0x61, 0x73, 0x6D];
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Read the WASM module
-    let wasm_bytes = std::fs::read("target/wasm32-unknown-unknown/release/wasm_module.wasm")?;
+    // Create input - include mock WASM code and parameters
+    let mut input = MOCK_WASM.to_vec();
+    input.push(b',');
+    
+    // Parameters for addition - the simulator will add these two numbers
+    input.extend_from_slice(b"1,2");  // 1 + 2 = 3
 
     // Connect to the TEE service
     let mut client = TeeExecutionClient::connect("http://0.0.0.0:50051").await?;
 
     // Create execution request
     let request = Request::new(ExecutionRequest {
-        id_to: "0".to_string(),
-        function_call: "execute".to_string(),
-        parameters: wasm_bytes,
-        region_id: "default".to_string(),
+        id_to: "1".to_string(),
+        function_call: "add".to_string(),  // The simulator only supports "add"
+        parameters: input,
+        region_id: "default".to_string(), // Use the default region that the service adds
         detailed_proof: true,
         expected_hash: vec![],
     });
 
     // Execute the request
+    println!("Sending request to TEE service...");
     let response = client.execute(request).await?;
     let result = response.into_inner();
 

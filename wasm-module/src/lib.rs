@@ -104,6 +104,11 @@ unsafe fn handle_execution(params_offset: i32) -> Result<ExecutionResult, Execut
         data: b"WASM execution".to_vec(),
         signature: vec![0u8; 64],
         region_proof: None,
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        enclave_type: TeeType::SGX,
     };
 
     Ok(ExecutionResult {
@@ -250,6 +255,8 @@ mod tests {
             data: b"test".to_vec(),
             signature: vec![3u8; 64],
             region_proof: None,
+            timestamp: 0,
+            enclave_type: TeeType::SGX,
         };
 
         let result = ExecutionResult {
@@ -274,6 +281,7 @@ mod tests {
         let params = ExecutionParams {
             expected_hash: Some([0u8; 32]),
             detailed_proof: true,
+            function_call: "test".to_string(),
         };
 
         // This should fail since we have a hash mismatch
@@ -283,6 +291,7 @@ mod tests {
         let params = ExecutionParams {
             expected_hash: Some(measurement[0..32].try_into().unwrap()),
             detailed_proof: true,
+            function_call: "test".to_string(),
         };
         assert!(verify_execution_params(&params, wasm_bytes).is_ok());
     }
@@ -304,6 +313,8 @@ mod tests {
             data: b"test".to_vec(),
             signature: vec![3u8; 64],
             region_proof: None,
+            timestamp: 0,
+            enclave_type: TeeType::SGX,
         };
 
         let result = ExecutionResult {
