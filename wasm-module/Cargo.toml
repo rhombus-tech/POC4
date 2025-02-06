@@ -7,7 +7,8 @@ edition = "2021"
 crate-type = ["cdylib"]  # Compile as dynamic library for WASM
 
 [dependencies]
-tee-interface = { path = "../interface", default-features = false }
+tee-interface = { path = "../interface" }
+chrono = "0.4"
 wasm-bindgen = "0.2"
 getrandom = { version = "0.2", features = ["js"] }
 log = "0.4"

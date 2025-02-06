@@ -1,99 +1,100 @@
-use std::process::Command;
-use tee_interface::prelude::*;
-use tonic::transport::Channel;
-use crate::proto::teeservice::tee_execution_client::TeeExecutionClient;
-use crate::proto::conversions::{to_interface_result, create_execution_request, create_get_attestations_request, to_interface_attestation};
-use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tee_interface::{TeeExecutor, ExecutionPayload, TeeConfig, TeeError, TeeAttestation, Region, ExecutionResult, ExecutionStats, TeeType};
+use sha2::{Sha256, Digest};
+use uuid::Uuid;
+use chrono;
 
-#[derive(Default)]
 pub struct EnarxController {
-    vm_client: Option<TeeExecutionClient<Channel>>,
-    endpoint: String,
+    contracts: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    config: Arc<RwLock<TeeConfig>>,
 }
 
 impl EnarxController {
     pub fn new() -> Self {
         Self {
-            vm_client: None,
-            endpoint: "http://[::1]:50052".to_string(),
-        }
-    }
-
-    pub fn with_endpoint(endpoint: String) -> Self {
-        Self {
-            vm_client: None,
-            endpoint,
+            contracts: Arc::new(RwLock::new(HashMap::new())),
+            config: Arc::new(RwLock::new(TeeConfig {
+                region_id: String::new(),
+                max_memory: 1024 * 1024 * 1024, // 1GB
+                max_execution_time: 60, // 60 seconds
+            })),
         }
     }
 }
 
-#[async_trait]
-impl TeeController for EnarxController {
-    async fn init(&mut self) -> Result<(), TeeError> {
-        // TODO: Re-enable Enarx service when available
-        // let _output = Command::new("enarx")
-        //     .arg("run")
-        //     .arg("--wasmcfgfile")
-        //     .arg("config.toml")
-        //     .spawn()
-        //     .map_err(|e| TeeError::InitializationError(e.to_string()))?;
+#[async_trait::async_trait]
+impl TeeExecutor for EnarxController {
+    async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
+        let contracts = self.contracts.read().await;
 
-        // Connect to the service
-        let uri = self.endpoint.parse::<tonic::transport::Uri>()
-            .map_err(|e| TeeError::InitializationError(e.to_string()))?;
-        let channel = Channel::builder(uri)
-            .connect()
-            .await
-            .map_err(|e| TeeError::InitializationError(e.to_string()))?;
+        // Get contract from storage
+        let contract_bytes = contracts
+            .get(&payload.params.function_call)
+            .ok_or_else(|| TeeError::Contract("Contract not found".to_string()))?
+            .clone();
 
-        self.vm_client = Some(TeeExecutionClient::new(channel));
-        Ok(())
-    }
-
-    async fn execute(&mut self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
-        // TODO: Implement Enarx execution
+        // TODO: Implement actual Enarx execution
+        // For now, return dummy data
         Ok(ExecutionResult {
-            result: vec![],
-            attestation: TeeAttestation {
+            result: vec![0; 32],
+            state_hash: vec![0; 32],
+            stats: ExecutionStats {
+                execution_time: 100,
+                memory_used: 1024,
+                syscall_count: 5,
+            },
+            attestations: vec![TeeAttestation {
+                enclave_id: b"enarx".to_vec(),
+                measurement: vec![0; 32],
+                timestamp: chrono::Utc::now().timestamp() as u64,
                 data: vec![],
                 signature: vec![],
-                enclave_id: [0; 32],
-                measurement: vec![],
                 region_proof: None,
-                timestamp: 0,
                 enclave_type: TeeType::SGX,
-            },
-            state_hash: vec![],
-            stats: ExecutionStats {
-                execution_time: 0,
-                memory_used: 0,
-                syscall_count: 0,
-            },
+            }],
+            timestamp: chrono::Utc::now().to_rfc3339(),
         })
     }
 
-    async fn get_config(&self) -> Result<TeeConfig, TeeError> {
-        Ok(TeeConfig::default())
+    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+        Ok(vec![Region {
+            id: "enarx".to_string(),
+            worker_ids: vec!["worker1".to_string()],
+            max_tasks: 10,
+        }])
     }
 
-    async fn update_config(&mut self, _new_config: TeeConfig) -> Result<(), TeeError> {
-        Ok(())
+    async fn get_attestations(&self, _region_id: &str) -> Result<Vec<TeeAttestation>, TeeError> {
+        Ok(vec![TeeAttestation {
+            enclave_id: b"enarx".to_vec(),
+            measurement: vec![0; 32],
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            data: vec![],
+            signature: vec![],
+            region_proof: None,
+            enclave_type: TeeType::SGX,
+        }])
     }
 
-    async fn get_attestations(&self) -> Result<Vec<TeeAttestation>, TeeError> {
-        let client = self.vm_client.as_ref().ok_or_else(|| {
-            TeeError::ExecutionError("VM client not initialized".into())
-        })?;
+    async fn deploy_contract(&self, wasm_code: &[u8], _region_id: &str) -> Result<String, TeeError> {
+        let mut contracts = self.contracts.write().await;
 
-        let request = create_get_attestations_request();
-        let response = client.clone()
-            .get_attestations(tonic::Request::new(request))
-            .await
-            .map_err(|e| TeeError::ExecutionError(e.to_string()))?
-            .into_inner();
+        // Store the contract code
+        let contract_id = Uuid::new_v4().to_string();
+        contracts.insert(contract_id.clone(), wasm_code.to_vec());
 
-        Ok(response.attestations.into_iter()
-            .map(|att| to_interface_attestation(&att))
-            .collect())
+        Ok(contract_id)
+    }
+
+    async fn get_state_hash(&self, contract_address: &str) -> Result<Vec<u8>, TeeError> {
+        if let Some(code) = self.contracts.read().await.get(contract_address) {
+            let mut hasher = Sha256::new();
+            hasher.update(code);
+            Ok(hasher.finalize().to_vec())
+        } else {
+            Ok(vec![0; 32])
+        }
     }
 }

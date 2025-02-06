@@ -1,217 +1,154 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
-use chrono::Utc;
-use tee_interface::prelude::*;
-use super::paired_executor::TeeExecutorPair;
-use super::proto::conversions::to_proto_result;
+use tee_interface::{TeeExecutor, ExecutionPayload};
+use crate::proto::teeservice::tee_execution_server::TeeExecution;
+use crate::proto::teeservice::{
+    ExecutionRequest,
+    ExecutionResult,
+    GetRegionsRequest,
+    GetRegionsResponse,
+    GetAttestationsRequest,
+    RegionAttestations,
+    CreateContractRequest,
+    CreateContractResponse,
+};
 
-pub use super::proto::teeservice::{self, ExecutionRequest, ExecutionResult, GetRegionsRequest, GetRegionsResponse, GetAttestationsRequest, RegionAttestations, Region, TeeAttestation};
-pub use self::teeservice::tee_execution_server::TeeExecution;
-
-// Convert interface TeeAttestation to proto TeeAttestation
-fn convert_attestation(att: &tee_interface::TeeAttestation) -> TeeAttestation {
-    TeeAttestation {
-        data: att.data.clone(),
-        signature: att.signature.clone(),
-        timestamp: Utc::now().to_rfc3339(),
-        enclave_id: att.enclave_id.to_vec(),
-        measurement: att.measurement.clone(),
-        region_proof: att.region_proof.clone().unwrap_or_default(),
-        enclave_type: "SGX".to_string(), // TODO: Make this dynamic
-    }
+pub struct TeeServer {
+    executor: Arc<Box<dyn TeeExecutor + Send + Sync>>,
 }
 
-#[derive(Default)]
-pub struct TeeExecutionService {
-    pub regions: HashMap<String, (String, String)>, // region_id -> (sgx_config, sev_config)
-    executors: HashMap<String, Arc<RwLock<TeeExecutorPair>>>, // region_id -> executor pair
-}
-
-impl TeeExecutionService {
-    pub fn new() -> Self {
+impl TeeServer {
+    pub fn new(executor: Box<dyn TeeExecutor + Send + Sync>) -> Self {
         Self {
-            regions: HashMap::new(),
-            executors: HashMap::new(),
+            executor: Arc::new(executor),
         }
     }
-
-    pub fn add_region(&mut self, region_id: String, sgx_config: String, sev_config: String) {
-        self.regions.insert(region_id.clone(), (sgx_config.clone(), sev_config.clone()));
-        let executor = Arc::new(RwLock::new(TeeExecutorPair::new(region_id.clone(), sgx_config, sev_config)));
-        self.executors.insert(region_id, executor);
-    }
-
-    pub async fn init(&mut self) -> Result<(), TeeError> {
-        for executor in self.executors.values() {
-            let mut executor = executor.write().await;
-            executor.init().await?;
-        }
-        Ok(())
-    }
-
-    pub fn get_executor(&self, region_id: &str) -> Option<Arc<RwLock<TeeExecutorPair>>> {
-        self.executors.get(region_id).cloned()
-    }
 }
 
-#[async_trait::async_trait]
-impl TeeExecution for TeeExecutionService {
-    async fn execute(
-        &self,
-        request: Request<ExecutionRequest>,
-    ) -> Result<Response<ExecutionResult>, Status> {
-        let req = request.into_inner();
-        println!("Received execution request for region: {}", req.region_id);
-        println!("Function call: {}", req.function_call);
-        println!("Parameters size: {}", req.parameters.len());
-        
-        // Get executor for region
-        let executor = self.executors.get(&req.region_id)
-            .ok_or_else(|| Status::not_found(format!("Region {} not found", req.region_id)))?;
-
-        // Convert proto request to execution payload
-        let payload = ExecutionPayload {
-            execution_id: req.id_to.parse::<u64>()
-                .map_err(|e| Status::invalid_argument(format!("Invalid execution ID: {}", e)))?,
-            input: req.parameters,
-            params: ExecutionParams {
-                expected_hash: if req.expected_hash.is_empty() {
-                    None
-                } else {
-                    // Convert Vec<u8> to [u8; 32]
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&req.expected_hash);
-                    Some(hash)
-                },
-                detailed_proof: req.detailed_proof,
-                function_call: req.function_call,
-            },
-        };
-
-        // Execute in paired TEEs
-        let mut executor = executor.write().await;
-        let result = executor.execute(&payload)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        println!("SGX result: {:?}", result.sgx.result);
-        println!("SEV result: {:?}", result.sev.result);
-
-        // Convert result back to proto format using our conversion function
-        let proto_result = to_proto_result(result.sgx);  // Use the SGX result
-
-        println!("Final proto result: {:?}", proto_result.result);
-
-        Ok(Response::new(proto_result))
-    }
-
-    async fn get_regions(
-        &self,
-        _request: Request<GetRegionsRequest>,
-    ) -> Result<Response<GetRegionsResponse>, Status> {
-        let regions = self.regions.iter().map(|(id, _configs)| {
-            Region {
-                id: id.clone(),
-                created_at: Utc::now().to_rfc3339(),
-                worker_ids: vec![],
-                supported_tee_types: vec!["SGX".to_string(), "SEV".to_string()],
-                max_tasks: 100,
-            }
-        }).collect();
-
-        Ok(Response::new(GetRegionsResponse { regions }))
-    }
-
-    async fn get_attestations(
-        &self,
-        request: Request<GetAttestationsRequest>,
-    ) -> Result<Response<RegionAttestations>, Status> {
-        let req = request.into_inner();
-        
-        // Get executor for region
-        let executor = self.executors.get(&req.region_id)
-            .ok_or_else(|| Status::not_found(format!("Region {} not found", req.region_id)))?;
-
-        // Get attestations from both TEEs
-        let mut executor = executor.write().await;
-        let (sgx_att, sev_att) = executor.get_attestations()
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        Ok(Response::new(RegionAttestations {
-            attestations: vec![
-                convert_attestation(&sgx_att),
-                convert_attestation(&sev_att)
-            ],
-        }))
-    }
+pub struct TeeExecutionWrapper {
+    inner: Arc<RwLock<TeeServer>>,
 }
 
-pub struct TeeServiceWrapper {
-    service: Arc<RwLock<TeeExecutionService>>,
-}
-
-impl TeeServiceWrapper {
-    pub fn new(service: Arc<RwLock<TeeExecutionService>>) -> Self {
-        Self { service }
+impl TeeExecutionWrapper {
+    pub fn new(inner: Arc<RwLock<TeeServer>>) -> Self {
+        Self { inner }
     }
 }
 
 #[tonic::async_trait]
-impl TeeExecution for TeeServiceWrapper {
+impl TeeExecution for TeeExecutionWrapper {
     async fn execute(
         &self,
         request: Request<ExecutionRequest>,
     ) -> Result<Response<ExecutionResult>, Status> {
-        let request = request.into_inner();
-        let payload = ExecutionPayload {
-            execution_id: request.id_to.parse::<u64>()
-                .map_err(|e| Status::invalid_argument(format!("Invalid execution ID: {}", e)))?,
-            input: request.parameters,
-            params: ExecutionParams {
-                expected_hash: if request.expected_hash.is_empty() {
-                    None
-                } else {
-                    // Convert Vec<u8> to [u8; 32]
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&request.expected_hash);
-                    Some(hash)
-                },
-                detailed_proof: request.detailed_proof,
-                function_call: request.function_call,
-            },
-        };
-
-        // Execute payload
-        let mut service = self.service.write().await;
-        let executor = service.get_executor(&request.region_id)
-            .ok_or_else(|| Status::not_found(format!("Region {} not found", request.region_id)))?;
-        let mut executor = executor.write().await;
-        let result = executor.execute(&payload)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        // Convert result to response
-        let proto_result = to_proto_result(result.sgx);  // Use the SGX result
-
-        Ok(Response::new(proto_result))
+        let server = self.inner.read().await;
+        server.execute(request).await
     }
 
     async fn get_regions(
         &self,
         request: Request<GetRegionsRequest>,
     ) -> Result<Response<GetRegionsResponse>, Status> {
-        let service = self.service.read().await;
-        service.get_regions(request).await
+        let server = self.inner.read().await;
+        server.get_regions(request).await
     }
 
     async fn get_attestations(
         &self,
         request: Request<GetAttestationsRequest>,
     ) -> Result<Response<RegionAttestations>, Status> {
-        let service = self.service.read().await;
-        service.get_attestations(request).await
+        let server = self.inner.read().await;
+        server.get_attestations(request).await
+    }
+
+    async fn create_contract(
+        &self,
+        request: Request<CreateContractRequest>,
+    ) -> Result<Response<CreateContractResponse>, Status> {
+        let server = self.inner.read().await;
+        server.create_contract(request).await
+    }
+}
+
+#[tonic::async_trait]
+impl TeeExecution for TeeServer {
+    async fn execute(
+        &self,
+        request: Request<ExecutionRequest>,
+    ) -> Result<Response<ExecutionResult>, Status> {
+        let req = request.into_inner();
+        
+        let payload = ExecutionPayload {
+            params: req.clone().into(),
+            input: req.parameters,
+        };
+
+        let result = self.executor
+            .execute(&payload)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(ExecutionResult {
+            result: result.result,
+            state_hash: result.state_hash,
+            execution_time: result.stats.execution_time,
+            memory_used: result.stats.memory_used,
+            syscall_count: result.stats.syscall_count,
+            attestations: result.attestations.iter().map(|a| a.clone().into()).collect(),
+            timestamp: result.timestamp,
+        }))
+    }
+
+    async fn get_regions(
+        &self,
+        _request: Request<GetRegionsRequest>,
+    ) -> Result<Response<GetRegionsResponse>, Status> {
+        let regions = self.executor
+            .get_regions()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(GetRegionsResponse {
+            regions: regions.into_iter().map(|r| r.into()).collect(),
+        }))
+    }
+
+    async fn get_attestations(
+        &self,
+        request: Request<GetAttestationsRequest>,
+    ) -> Result<Response<RegionAttestations>, Status> {
+        let req = request.into_inner();
+        let attestations = self.executor
+            .get_attestations(&req.region_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(RegionAttestations {
+            attestations: attestations.into_iter().map(|a| a.into()).collect(),
+        }))
+    }
+
+    async fn create_contract(
+        &self,
+        request: Request<CreateContractRequest>,
+    ) -> Result<Response<CreateContractResponse>, Status> {
+        let req = request.into_inner();
+        let address = self.executor
+            .deploy_contract(&req.wasm_code, &req.region_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let state_hash = self.executor
+            .get_state_hash(&address)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(CreateContractResponse {
+            address,
+            state_hash,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            attestations: vec![],
+        }))
     }
 }

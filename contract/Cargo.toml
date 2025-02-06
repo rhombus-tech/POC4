@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test", "bindings"] }
 tee-interface = { path = "../interface" }
+chrono = "0.4"
 thiserror = "1.0"
 borsh = { version = "1.5", features = ["derive"] }
 sha2 = "0.10"

@@ -1,197 +1,135 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use wasmlanche::simulator::Simulator as BaseSimulator;
-use wasmlanche::Address;
-use wasmlanche::bytemuck::Zeroable;
-use tee_interface::prelude::*;
-use borsh::{BorshDeserialize, BorshSerialize};
+use tee_interface::{TeeExecutor, ExecutionPayload, TeeError, TeeAttestation, Region, ExecutionResult, ExecutionStats, TeeType};
+use wasmlanche::{
+    simulator::Simulator,
+    types::Address as WasmlAddress,
+};
+use uuid::Uuid;
+use chrono;
+use sha2::{Sha256, Digest};
 
-#[derive(Default)]
-pub struct WasmSimulator {
-    simulator: Arc<RwLock<BaseSimulator>>,
-    contract_addr: Option<Address>,
+const DEFAULT_GAS: u64 = 1_000_000;
+
+pub struct SimulatorController {
+    simulator: Arc<RwLock<Simulator>>,
+    contracts: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
-impl WasmSimulator {
+impl SimulatorController {
     pub fn new() -> Self {
+        let default_address = WasmlAddress::new([0; 33]); // Create a default address for the simulator
         Self {
-            simulator: Arc::new(RwLock::new(BaseSimulator::new())),
-            contract_addr: None,
+            simulator: Arc::new(RwLock::new(Simulator::new(default_address.into()))),
+            contracts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub fn get_contract_addr(&self) -> Option<Address> {
-        self.contract_addr.clone()
-    }
-
-    pub fn set_contract_addr(&mut self, addr: Address) {
-        self.contract_addr = Some(addr);
-    }
-
-    pub async fn execute_wasm(
-        &mut self,
-        wasm_code: &[u8],
-        function_name: &str,
-        params: &[u8],
-        gas: u64,
-    ) -> Result<Vec<u8>, TeeError> {
-        let mut simulator = self.simulator.write().await;
-        
-        // Create contract
-        let result = simulator.create_contract(wasm_code.to_vec()).await
-            .map_err(|e| TeeError::ExecutionError(format!("Contract creation failed: {}", e)))?;
-        let contract_addr = result.address;
-
-        // Call contract
-        let result = simulator.call_contract(
-            contract_addr,
-            function_name,
-            params.to_vec(),  // Convert &[u8] to Vec<u8> for BorshSerialize
-            gas
-        ).await
-            .map_err(|e| TeeError::ExecutionError(format!("Contract execution failed: {}", e)))?;
-        Ok(result)
-    }
-
-    pub async fn create_contract(&mut self, wasm_code: Vec<u8>) -> Result<Address, TeeError> {
-        let mut simulator = self.simulator.write().await;
-        let result = simulator.create_contract(wasm_code).await
-            .map_err(|e| TeeError::ExecutionError(format!("Contract creation failed: {}", e)))?;
-        Ok(result.address)
-    }
-
-    pub async fn execute_contract<T: BorshDeserialize>(
-        &mut self,
-        _contract_code: &[u8],
-        contract_addr: Address,
-        function_name: &str,
-        params: &[u8],
-        gas: u64,
-    ) -> Result<T, TeeError> {
-        let mut simulator = self.simulator.write().await;
-        let result = simulator.call_contract(
-            contract_addr,
-            function_name,
-            params.to_vec(),  // Convert &[u8] to Vec<u8> for BorshSerialize
-            gas
-        ).await
-            .map_err(|e| TeeError::ExecutionError(format!("Contract execution failed: {}", e)))?;
-        borsh::BorshDeserialize::try_from_slice(&result)
-            .map_err(|e| TeeError::ExecutionError(format!("Failed to deserialize result: {}", e)))
-    }
-
-    pub async fn call_contract(
-        &mut self,
-        contract_addr: Address,
-        function_name: &str,
-        params: &[u8],
-        gas: u64,
-    ) -> Result<Vec<u8>, TeeError> {
-        let simulator = self.simulator.clone();
-        let function_name = function_name.to_string();
-        let params = params.to_vec();
-
-        let mut sim = simulator.write().await;
-        let result = sim.call_contract(contract_addr, &function_name, params, gas)
-            .await
-            .map_err(|e| TeeError::ExecutionError(format!("Contract execution failed: {}", e)))?;
-
-        Ok(result)
-    }
-
-    pub async fn get_balance(&self, account: Address) -> u64 {
-        self.simulator.read().await.get_balance(account).await
-    }
-
-    pub async fn set_balance(&mut self, account: Address, balance: u64) {
-        self.simulator.write().await.set_balance(account, balance).await;
+    fn create_deterministic_address(contract_bytes: &[u8]) -> WasmlAddress {
+        let mut hasher = Sha256::new();
+        hasher.update(contract_bytes);
+        let result = hasher.finalize();
+        let mut addr = [0u8; 33];
+        addr[..32].copy_from_slice(&result);
+        addr[32] = 0; // Version byte
+        WasmlAddress::new(addr)
     }
 }
 
 #[async_trait::async_trait]
-impl TeeController for WasmSimulator {
-    async fn init(&mut self) -> Result<(), TeeError> {
-        Ok(())
-    }
-
-    async fn execute(&mut self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
-        let contract_addr = if let Some(addr) = self.contract_addr.clone() {
-            addr
-        } else {
-            // Create contract if not already created
-            let addr = self.create_contract(payload.input.clone()).await?;
-            self.contract_addr = Some(addr.clone());
-            addr
+impl TeeExecutor for SimulatorController {
+    async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
+        // Get contract code first
+        let contract_code = {
+            let contracts = self.contracts.read().await;
+            contracts
+                .get(&payload.params.id_to)
+                .ok_or_else(|| TeeError::Contract("Contract not found".to_string()))?
+                .clone()
         };
 
         // Execute contract
-        let result = self.call_contract(
-            contract_addr,
-            &payload.params.function_call,
-            &[], // Empty params for now
-            1_000_000, // Default gas limit
-        ).await?;
+        let result = {
+            let mut simulator = self.simulator.write().await;
+            let execution = simulator.execute(
+                &contract_code,
+                &payload.params.function_call,
+                &payload.input,
+                DEFAULT_GAS,
+            ).await.map_err(|e| TeeError::Contract(e.to_string()))?;
+            execution
+        };
 
         Ok(ExecutionResult {
             result,
-            attestation: TeeAttestation {
-                data: vec![1, 2, 3], // TODO: Real data
-                signature: vec![1, 2, 3], // TODO: Real signature
-                enclave_id: [0; 32],
-                measurement: vec![4, 5, 6],
-                region_proof: Some(vec![7, 8, 9]),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                enclave_type: TeeType::SGX,
-            },
-            state_hash: vec![10, 11, 12], // TODO: Real state hash
+            state_hash: vec![0; 32], // Placeholder state hash
             stats: ExecutionStats {
                 execution_time: 0,
                 memory_used: 0,
                 syscall_count: 0,
             },
+            attestations: vec![TeeAttestation {
+                enclave_id: b"simulator".to_vec(),
+                measurement: vec![0; 32],
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                data: vec![],
+                signature: vec![],
+                region_proof: None,
+                enclave_type: TeeType::SGX,
+            }],
+            timestamp: chrono::Utc::now().to_rfc3339(),
         })
     }
 
-    async fn get_config(&self) -> Result<TeeConfig, TeeError> {
-        Ok(TeeConfig::default())
+    async fn deploy_contract(&self, wasm_code: &[u8], _region_id: &str) -> Result<String, TeeError> {
+        // Generate contract ID
+        let contract_id = Uuid::new_v4().to_string();
+
+        // Store contract code
+        {
+            let mut contracts = self.contracts.write().await;
+            contracts.insert(contract_id.clone(), wasm_code.to_vec());
+        }
+
+        // Deploy contract
+        {
+            let mut simulator = self.simulator.write().await;
+            let execution = simulator.execute(wasm_code, "deploy", &[], DEFAULT_GAS)
+                .await.map_err(|e| TeeError::Contract(e.to_string()))?;
+        }
+
+        Ok(contract_id)
     }
 
-    async fn update_config(&mut self, _new_config: TeeConfig) -> Result<(), TeeError> {
-        Ok(())
+    async fn get_state_hash(&self, contract_address: &str) -> Result<Vec<u8>, TeeError> {
+        let contracts = self.contracts.read().await;
+        if let Some(code) = contracts.get(contract_address) {
+            let mut hasher = Sha256::new();
+            hasher.update(code);
+            Ok(hasher.finalize().to_vec())
+        } else {
+            Err(TeeError::Contract("Contract not found".to_string()))
+        }
     }
 
-    async fn get_attestations(&self) -> Result<Vec<TeeAttestation>, TeeError> {
-        Ok(vec![])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(BorshDeserialize, BorshSerialize)]
-    struct AddParams {
-        a: u64,
-        b: u64,
+    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+        Ok(vec![Region {
+            id: "simulator".to_string(),
+            worker_ids: vec!["simulator-1".to_string()],
+            max_tasks: 100,
+        }])
     }
 
-    #[tokio::test]
-    async fn test_simple_add() {
-        let mut simulator = WasmSimulator::new();
-        let wasm_code = include_bytes!("../tests/contracts/simple_add/target/wasm32-unknown-unknown/release/simple_add.wasm").to_vec();
-        let contract_addr = simulator.create_contract(wasm_code.clone()).await.unwrap();
-        let params = AddParams { a: 40, b: 2 };
-        let params_bytes = borsh::to_vec(&params).unwrap();
-        let result: u64 = simulator.execute_contract(
-            &wasm_code,
-            contract_addr,
-            "add",
-            &params_bytes,
-            0
-        ).await.unwrap();
-        assert_eq!(result, 42);
+    async fn get_attestations(&self, _region_id: &str) -> Result<Vec<TeeAttestation>, TeeError> {
+        Ok(vec![TeeAttestation {
+            enclave_id: b"simulator".to_vec(),
+            measurement: vec![0; 32],
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            data: vec![],
+            signature: vec![],
+            region_proof: None,
+            enclave_type: TeeType::SGX,
+        }])
     }
 }

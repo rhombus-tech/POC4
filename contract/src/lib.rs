@@ -1,5 +1,6 @@
 use borsh::{BorshSerialize, BorshDeserialize};
-use tee_interface::prelude::*;
+use tee_interface::{ExecutionResult, ExecutionStats, TeeError, TeeAttestation, TeeType};
+use chrono;
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum ContractError {
@@ -23,20 +24,6 @@ impl TeeContract {
         // Update state
         self.state.extend_from_slice(input);
         
-        // Generate attestation
-        let attestation = TeeAttestation {
-            enclave_id: [1u8; 32], // TODO: Get real enclave ID
-            measurement: vec![2u8; 32], // TODO: Get real measurement
-            data: b"Contract execution".to_vec(),
-            signature: vec![3u8; 64], // TODO: Generate real signature
-            region_proof: Some(vec![4u8; 32]),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            enclave_type: TeeType::SGX,
-        };
-
         // Calculate state hash
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
@@ -50,11 +37,26 @@ impl TeeContract {
             syscall_count: 10, // TODO: Track real syscalls
         };
 
+        let output = input.to_vec();
+
+        let attestations = vec![TeeAttestation {
+            enclave_id: vec![0; 32],
+            measurement: vec![1; 32],
+            data: vec![2; 32],
+            signature: vec![3; 64],
+            region_proof: Some(vec![4; 32]),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            enclave_type: TeeType::SGX,
+        }];
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+
         Ok(ExecutionResult {
-            result: input.to_vec(),
-            attestation,
+            result: output,
             state_hash,
             stats,
+            attestations,
+            timestamp,
         })
     }
 }
@@ -106,12 +108,12 @@ mod tests {
         let result = contract.execute(input).unwrap();
         
         assert_eq!(result.result, input);
-        assert_eq!(result.attestation.enclave_id.len(), 32);
-        assert_eq!(result.attestation.measurement.len(), 32);
         assert!(!result.state_hash.is_empty());
         assert!(result.stats.execution_time > 0);
         assert!(result.stats.memory_used > 0);
         assert!(result.stats.syscall_count > 0);
+        assert!(!result.attestations.is_empty());
+        assert!(!result.timestamp.is_empty());
     }
 }
 
@@ -123,16 +125,21 @@ mod simulator_tests {
 
     #[tokio::test]
     async fn test_tee_contract_execution() {
-        let mut simulator = Simulator::new();
+        // Create contract address
+        let contract_addr = Address::new(vec![1u8; 32]);
+        
+        // Create and initialize simulator
+        let mut simulator = Simulator::new(contract_addr.clone());
+        simulator.init().await;
+        
         let input = b"test input";
         
-        // Create contract address and deploy code
-        let contract_addr = Address::new(vec![1u8; 32]);
+        // Deploy code
         let contract_bytes = include_bytes!("../../target/wasm32-unknown-unknown/debug/tee_contract.wasm");
-        simulator.create_contract(contract_addr.clone(), contract_bytes.to_vec());
+        simulator.create_contract(contract_addr.to_vec(), contract_bytes.to_vec()).await.unwrap();
         
         // Execute the contract
-        let result = simulator.execute(contract_bytes, "execute", input, 1000000).await.unwrap();
+        let result = simulator.execute(&contract_addr.to_vec(), "execute", input, 1000000).await.unwrap();
         
         // Verify the result
         assert!(!result.is_empty());

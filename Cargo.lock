@@ -984,6 +984,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "home"
 version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1748,6 +1754,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "sdk-macros"
 version = "0.1.0"
 dependencies = [
+ "borsh",
  "cfg-if 1.0.0",
  "proc-macro2",
  "quote",
@@ -1843,6 +1850,7 @@ dependencies = [
  "bindgen",
  "borsh",
  "libc",
+ "parking_lot",
  "serde_json",
  "thiserror",
  "tokio",
@@ -1926,6 +1934,7 @@ name = "tee-contract"
 version = "0.1.0"
 dependencies = [
  "borsh",
+ "chrono",
  "sha2",
  "simulator",
  "tee-interface",
@@ -1944,6 +1953,8 @@ dependencies = [
  "clap",
  "futures",
  "futures-util",
+ "hex",
+ "parking_lot",
  "prost",
  "serde",
  "serde_json",
@@ -1953,10 +1964,11 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tonic",
- "tonic-build",
+ "tonic 0.11.0",
+ "tonic-build 0.11.0",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wasmlanche",
 ]
 
@@ -1977,8 +1989,8 @@ dependencies = [
  "syn",
  "thiserror",
  "tokio",
- "tonic",
- "tonic-build",
+ "tonic 0.10.2",
+ "tonic-build 0.10.2",
 ]
 
 [[package]]
@@ -2142,10 +2154,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "tonic"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76c4eb7a4e9ef9d4763600161f12f5070b92a578e1b634db88a6887844c91a13"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64",
+ "bytes",
+ "h2",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-timeout",
+ "percent-encoding",
+ "pin-project",
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "tonic-build"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d021fc044c18582b9a2408cd0dd05b1596e3ecdb5c4df822bb0183545683889"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "prost-build",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "tonic-build"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4ef6dd70a610078cb4e338a0f79d06bc759ff1b22d2120c2ff02ae264ba9c2"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -2284,6 +2336,9 @@ name = "uuid"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ced87ca4be083373936a67f8de945faa23b6b42384bd5b64434850802c6dccd0"
+dependencies = [
+ "getrandom 0.3.1",
+]
 
 [[package]]
 name = "valuable"
@@ -2417,6 +2472,7 @@ version = "0.1.0"
 dependencies = [
  "borsh",
  "borsh-derive",
+ "chrono",
  "console_error_panic_hook",
  "console_log",
  "getrandom 0.2.15",
@@ -2427,7 +2483,7 @@ dependencies = [
  "tee-interface",
  "thiserror",
  "tokio",
- "tonic-build",
+ "tonic-build 0.11.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasmlanche",
@@ -2449,6 +2505,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "displaydoc",
  "hashbrown 0.14.5",
+ "parking_lot",
  "sdk-macros",
  "simulator",
  "thiserror",

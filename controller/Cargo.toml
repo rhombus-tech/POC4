@@ -5,15 +5,18 @@ edition = "2021"
 
 [dependencies]
 # Internal dependencies
-tokio = { version = "1.36.0", features = ["full"] }
-tonic = "0.10.2"
+tokio = { version = "1.0", features = ["full", "macros", "rt-multi-thread"] }
+tonic = { version = "0.11", features = ["transport"] }
 prost = { workspace = true }
-tee-interface = { path = "../interface" }
+tee-interface = { path = "../interface", features = ["async"] }
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
-async-trait = "0.1.77"
-futures = "0.3"
+async-trait = "0.1"
+futures = { version = "0.3", features = ["std", "async-await"] }
 futures-util = "0.3"
 tempfile = "3.8"
+uuid = { version = "1.0", features = ["v4"] }
+hex = "0.4.3"
+parking_lot = "0.12.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["std", "simulator", "bindings"] }
@@ -40,8 +43,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-build = "0.11"
 
 [dev-dependencies]
-tokio = { version = "1.36.0", features = ["full", "test-util"] }
+tokio = { version = "1.0", features = ["full", "macros", "rt-multi-thread", "test-util"] }
 simple_add = { path = "tests/contracts/simple_add" }

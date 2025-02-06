@@ -5,13 +5,13 @@ edition = "2021"
 
 [dependencies]
 # Core dependencies
-borsh = { version = "1.2", features = ["derive"] }
+borsh = { version = "1.5", features = ["derive"] }
 borsh-derive = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 sha2 = "0.10"
-async-trait = { version = "0.1", optional = true }
+async-trait = { version = "0.1.77", optional = true }
 log = "0.4"
 
 # Proc macro support
@@ -26,7 +26,7 @@ prost = { version = "0.12", optional = true }
 
 [features]
 default = ["async"]
-async = ["tokio", "async-trait", "tonic", "prost"]
+async = ["async-trait"]
 
 [build-dependencies]
 tonic-build = { version = "0.10" }

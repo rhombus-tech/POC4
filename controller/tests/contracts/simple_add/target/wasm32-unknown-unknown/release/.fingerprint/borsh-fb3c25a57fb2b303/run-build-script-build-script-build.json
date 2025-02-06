@@ -1,1 +1,0 @@
-{"rustc":12232068108751765048,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[7718779164700081417,"build_script_build",false,13757130749312241877]],"local":[{"Precalculated":"1.5.5"}],"rustflags":["-C","target-feature=+bulk-memory","-C","link-arg=--import-memory","-C","link-arg=--export-table"],"config":0,"compile_kind":0}

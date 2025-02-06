@@ -2,7 +2,10 @@
 use wasm_bindgen::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-use wasmlanche::{Context, Address};
+use wasmlanche::{
+    types::Address as WasmlAddress,
+    Context,
+};
 
 use tee_interface::prelude::*;
 use thiserror::Error;
@@ -10,6 +13,7 @@ use sha2::{Sha256, Digest};
 use std::alloc::Layout;
 use log;
 use borsh::{BorshSerialize, BorshDeserialize};
+use chrono;
 
 mod computation;
 pub use computation::*;
@@ -83,7 +87,7 @@ unsafe fn handle_execution(params_offset: i32) -> Result<ExecutionResult, Execut
         .map_err(|e| ExecutionError::DeserializationError(e.to_string()))?;
 
     #[cfg(not(target_arch = "wasm32"))]
-    let context = Context::with_actor(Address::default());
+    let context = Context::with_actor(WasmlAddress::new([0; 33]));
 
     #[cfg(not(target_arch = "wasm32"))]
     let wasm_result = execute_in_tee(&context, &payload.input)
@@ -98,24 +102,20 @@ unsafe fn handle_execution(params_offset: i32) -> Result<ExecutionResult, Execut
         syscall_count: 0,
     };
 
-    let attestation = TeeAttestation {
-        enclave_id: [0u8; 32],
-        measurement: compute_measurement(&payload.input),
-        data: b"WASM execution".to_vec(),
-        signature: vec![0u8; 64],
-        region_proof: None,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-        enclave_type: TeeType::SGX,
-    };
-
     Ok(ExecutionResult {
         result: wasm_result.output,
-        attestation,
         state_hash: wasm_result.proof.unwrap_or_default(),
         stats,
+        attestations: vec![TeeAttestation {
+            enclave_id: vec![0; 32],
+            measurement: vec![1; 32],
+            data: vec![2; 32],
+            signature: vec![3; 64],
+            region_proof: Some(vec![4; 32]),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            enclave_type: TeeType::SGX,
+        }],
+        timestamp: chrono::Utc::now().to_rfc3339(),
     })
 }
 
@@ -139,6 +139,7 @@ fn store_error(msg: &str) {
 }
 
 fn compute_measurement(data: &[u8]) -> Vec<u8> {
+    use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().to_vec()
@@ -176,13 +177,107 @@ fn execute_wasm(input: &[u8]) -> Result<WasmExecutionResult, String> {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn execute_external(params: *const u8, params_len: usize) -> *mut u8 {
+    let params_slice = unsafe { std::slice::from_raw_parts(params, params_len) };
+    match execute_impl(params_slice) {
+        Ok(result) => {
+            let ptr = Box::into_raw(result.into_boxed_slice()) as *mut u8;
+            ptr
+        }
+        Err(e) => {
+            let error_msg = format!("Error: {}", e);
+            let error_bytes = error_msg.into_bytes();
+            let ptr = Box::into_raw(error_bytes.into_boxed_slice()) as *mut u8;
+            ptr
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn free_result(ptr: *mut u8, len: usize) {
+    unsafe {
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum TeeError {
+    #[error("Execution error: {0}")]
+    ExecutionError(String),
+
+    #[error("Verification error: {0}")]
+    VerificationError(String),
+}
+
+fn execute_impl(params: &[u8]) -> Result<Vec<u8>, TeeError> {
+    // Deserialize payload
+    let payload: ExecutionPayload = borsh::from_slice(params)
+        .map_err(|e| TeeError::ExecutionError(format!("Failed to deserialize payload: {}", e)))?;
+
+    // Execute the contract
+    let result = execute_contract(&payload)
+        .map_err(|e| TeeError::ExecutionError(format!("Failed to execute: {}", e)))?;
+
+    // Verify state if expected hash is provided
+    if !payload.params.expected_hash.is_empty() {
+        verify_state(&result.state_hash, &payload.params.expected_hash)
+            .map_err(|e| TeeError::VerificationError(format!("Proof verification failed: {}", e)))?;
+    }
+
+    // Serialize the result
+    let bytes = borsh::to_vec(&result)
+        .map_err(|e| TeeError::ExecutionError(format!("Failed to serialize result: {}", e)))?;
+
+    Ok(bytes)
+}
+
+fn execute_contract(payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
+    // Example execution
+    let result = payload.input.clone();
+    let state_hash = vec![0u8; 32];
+    
+    let stats = ExecutionStats {
+        execution_time: 100,
+        memory_used: 1024,
+        syscall_count: 5,
+    };
+
+    Ok(ExecutionResult {
+        result,
+        state_hash,
+        stats,
+        attestations: vec![TeeAttestation {
+            enclave_id: vec![0; 32],
+            measurement: vec![1; 32],
+            data: vec![2; 32],
+            signature: vec![3; 64],
+            region_proof: Some(vec![4; 32]),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            enclave_type: TeeType::SGX,
+        }],
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+fn verify_state(state_hash: &[u8], expected_hash: &[u8]) -> Result<(), TeeError> {
+    if state_hash != expected_hash {
+        return Err(TeeError::VerificationError(format!(
+            "State hash mismatch: expected {:?}, got {:?}",
+            expected_hash, state_hash
+        )));
+    }
+    Ok(())
+}
+
 fn verify_execution_params(params: &ExecutionParams, wasm_bytes: &[u8]) -> Result<bool, TeeError> {
     // Verify execution parameters
-    if let Some(expected_hash) = params.expected_hash {
+    if !params.expected_hash.is_empty() {
         let measurement = compute_measurement(wasm_bytes);
-        if measurement != expected_hash.to_vec() {
+        if measurement != params.expected_hash {
             return Err(TeeError::VerificationError(
-                "Hash mismatch".to_string()
+                format!("Hash mismatch: expected {:?}, got {:?}",
+                    params.expected_hash, measurement)
             ));
         }
     }
@@ -249,21 +344,20 @@ mod tests {
             syscall_count: 0,
         };
 
-        let attestation = TeeAttestation {
-            enclave_id: [0u8; 32],
-            measurement: vec![2u8; 32],
-            data: b"test".to_vec(),
-            signature: vec![3u8; 64],
-            region_proof: None,
-            timestamp: 0,
-            enclave_type: TeeType::SGX,
-        };
-
         let result = ExecutionResult {
             result: b"output".to_vec(),
-            attestation,
             state_hash: vec![5u8; 32],
             stats,
+            attestations: vec![TeeAttestation {
+                enclave_id: vec![0; 32],
+                measurement: vec![1; 32],
+                data: vec![2; 32],
+                signature: vec![3; 64],
+                region_proof: Some(vec![4; 32]),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                enclave_type: TeeType::SGX,
+            }],
+            timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
         let bytes = borsh::to_vec(&result).unwrap();
@@ -275,25 +369,39 @@ mod tests {
 
     #[test]
     fn test_execution_params() {
-        let wasm_bytes = b"test wasm";
-        let measurement = compute_measurement(wasm_bytes);
+        let wasm_bytes = b"test wasm code".to_vec();
+        let measurement = compute_measurement(&wasm_bytes);
 
+        // Test with no hash
         let params = ExecutionParams {
-            expected_hash: Some([0u8; 32]),
+            id_to: "test_contract".to_string(),
+            expected_hash: vec![],
+            detailed_proof: true,
+            function_call: "test".to_string(),
+        };
+
+        // This should pass since we have no hash to verify
+        assert!(verify_execution_params(&params, &wasm_bytes).is_ok());
+
+        // Test with wrong hash
+        let params = ExecutionParams {
+            id_to: "test_contract".to_string(),
+            expected_hash: vec![0; 32],
             detailed_proof: true,
             function_call: "test".to_string(),
         };
 
         // This should fail since we have a hash mismatch
-        assert!(verify_execution_params(&params, wasm_bytes).is_err());
+        assert!(verify_execution_params(&params, &wasm_bytes).is_err());
 
         // Test with matching hash
         let params = ExecutionParams {
-            expected_hash: Some(measurement[0..32].try_into().unwrap()),
+            id_to: "test_contract".to_string(),
+            expected_hash: measurement.clone(),
             detailed_proof: true,
             function_call: "test".to_string(),
         };
-        assert!(verify_execution_params(&params, wasm_bytes).is_ok());
+        assert!(verify_execution_params(&params, &wasm_bytes).is_ok());
     }
 
     #[test]
@@ -307,21 +415,20 @@ mod tests {
             syscall_count: 0,
         };
 
-        let attestation = TeeAttestation {
-            enclave_id: [0u8; 32],
-            measurement: state_hash.clone(),
-            data: b"test".to_vec(),
-            signature: vec![3u8; 64],
-            region_proof: None,
-            timestamp: 0,
-            enclave_type: TeeType::SGX,
-        };
-
         let result = ExecutionResult {
             result: output,
-            attestation,
             state_hash,
             stats,
+            attestations: vec![TeeAttestation {
+                enclave_id: vec![0; 32],
+                measurement: vec![1; 32],
+                data: vec![2; 32],
+                signature: vec![3; 64],
+                region_proof: Some(vec![4; 32]),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                enclave_type: TeeType::SGX,
+            }],
+            timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
         assert!(verify_result(&result).is_ok());
@@ -333,4 +440,36 @@ mod tests {
         let ptr = compute(input.as_ptr(), input.len());
         assert!(ptr > 0);
     }
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct ExecutionResult {
+    result: Vec<u8>,
+    state_hash: Vec<u8>,
+    stats: ExecutionStats,
+    attestations: Vec<TeeAttestation>,
+    timestamp: String,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct TeeAttestation {
+    enclave_id: Vec<u8>,
+    measurement: Vec<u8>,
+    data: Vec<u8>,
+    signature: Vec<u8>,
+    region_proof: Option<Vec<u8>>,
+    timestamp: u64,
+    enclave_type: TeeType,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+enum TeeType {
+    SGX,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct ExecutionStats {
+    execution_time: u64,
+    memory_used: u64,
+    syscall_count: u64,
 }

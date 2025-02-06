@@ -2,10 +2,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Server;
 use clap::Parser;
-use crate::server::TeeExecutionService;
-use crate::server::teeservice::tee_execution_server::TeeExecutionServer;
-use crate::server::TeeServiceWrapper;
-use tee_interface::TeeController;
+use crate::server::{TeeServer, TeeExecutionWrapper};
+use crate::proto::teeservice::tee_execution_server::TeeExecutionServer;
+use crate::simulator::SimulatorController;
 
 mod server;
 mod simulator;
@@ -32,19 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Create and initialize service
-    let mut service = TeeExecutionService::new();
-    service.add_region(
-        "default".to_string(),
-        "sgx_config".to_string(),
-        "sev_config".to_string(),
-    );
-    service.add_region(args.region.clone(), "sgx_config.json".into(), "sev_config.json".into());
-    service.init().await?;
-    let service = Arc::new(RwLock::new(service));
+    // Create simulator executor
+    let simulator = SimulatorController::new();
     
-    // Create service wrapper and start gRPC server
-    let wrapper = TeeServiceWrapper::new(service);
+    // Create TEE server with simulator executor
+    let service = TeeServer::new(Box::new(simulator));
+    let service = Arc::new(RwLock::new(service));
+    let wrapper = TeeExecutionWrapper::new(service);
+    
+    // Start gRPC server
     let addr = args.addr.parse()?;
     println!("Starting TEE service on {}", addr);
 
