@@ -1,3 +1,0 @@
-cargo:rustc-link-search=native=../../target/debug
-cargo:rustc-link-lib=static=simulator
-cargo:rerun-if-changed=../../target/debug/libsimulator.a
