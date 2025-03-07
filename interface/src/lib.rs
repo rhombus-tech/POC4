@@ -13,6 +13,16 @@ pub mod types {
         pub syscall_count: u64,
     }
 
+    impl Default for ExecutionStats {
+        fn default() -> Self {
+            Self {
+                execution_time: 0,
+                memory_used: 0,
+                syscall_count: 0,
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     pub struct ExecutionParams {
         pub id_to: String,
@@ -21,10 +31,36 @@ pub mod types {
         pub expected_hash: Vec<u8>,
     }
 
+    impl Default for ExecutionParams {
+        fn default() -> Self {
+            Self {
+                id_to: String::new(),
+                function_call: String::new(),
+                detailed_proof: false,
+                expected_hash: Vec::new(),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     pub struct ExecutionPayload {
         pub input: Vec<u8>,
         pub params: ExecutionParams,
+        pub operation_id: Option<String>,
+        pub previous_operation_id: Option<String>,
+        pub operation_context: Option<Vec<u8>>,
+    }
+
+    impl Default for ExecutionPayload {
+        fn default() -> Self {
+            Self {
+                input: Vec::new(),
+                params: ExecutionParams::default(),
+                operation_id: None,
+                previous_operation_id: None,
+                operation_context: None,
+            }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -34,6 +70,24 @@ pub mod types {
         pub stats: ExecutionStats,
         pub attestations: Vec<TeeAttestation>,
         pub timestamp: String,
+        pub operation_status: Option<String>,
+        pub operation_id: Option<String>,
+        pub pending_operations: Option<Vec<String>>,
+    }
+
+    impl Default for ExecutionResult {
+        fn default() -> Self {
+            Self {
+                result: Vec::new(),
+                state_hash: Vec::new(),
+                stats: ExecutionStats::default(),
+                attestations: Vec::new(),
+                timestamp: String::new(),
+                operation_status: None,
+                operation_id: None,
+                pending_operations: None,
+            }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -74,6 +128,20 @@ pub mod types {
         pub signature: Vec<u8>,
         pub region_proof: Option<Vec<u8>>,
         pub enclave_type: TeeType,
+    }
+
+    impl Default for TeeAttestation {
+        fn default() -> Self {
+            Self {
+                enclave_id: Vec::new(),
+                measurement: Vec::new(),
+                timestamp: 0,
+                data: Vec::new(),
+                signature: Vec::new(),
+                region_proof: None,
+                enclave_type: TeeType::SGX,
+            }
+        }
     }
 }
 

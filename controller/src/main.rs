@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Create simulator executor
-    let simulator = SimulatorController::new();
+    let simulator = SimulatorController::new().await;
     
     // Create TEE server with simulator executor
     let service = TeeServer::new(Box::new(simulator));

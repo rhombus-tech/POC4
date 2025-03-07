@@ -59,6 +59,8 @@ mod tests {
     fn test_simple_computation() {
         let mut engine = ComputationEngine::new();
         
+        use tee_interface::types::ExecutionPayload;
+        
         let payload = ExecutionPayload {
             input: vec![1, 2, 3, 4],
             ..Default::default()

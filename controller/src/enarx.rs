@@ -27,13 +27,13 @@ impl EnarxController {
 #[async_trait::async_trait]
 impl TeeExecutor for EnarxController {
     async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
-        let contracts = self.contracts.read().await;
-
-        // Get contract from storage
-        let contract_bytes = contracts
-            .get(&payload.params.function_call)
-            .ok_or_else(|| TeeError::Contract("Contract not found".to_string()))?
-            .clone();
+        // Get contract from storage - clone to avoid holding lock across await points
+        let contract_bytes = {
+            let contracts = self.contracts.read().await;
+            contracts.get(&payload.params.function_call)
+                .ok_or_else(|| TeeError::Contract("Contract not found".to_string()))?
+                .clone()
+        };
 
         // TODO: Implement actual Enarx execution
         // For now, return dummy data
@@ -55,6 +55,9 @@ impl TeeExecutor for EnarxController {
                 enclave_type: TeeType::SGX,
             }],
             timestamp: chrono::Utc::now().to_rfc3339(),
+            operation_id: None,
+            operation_status: None,
+            pending_operations: None,
         })
     }
 
@@ -89,7 +92,17 @@ impl TeeExecutor for EnarxController {
     }
 
     async fn get_state_hash(&self, contract_address: &str) -> Result<Vec<u8>, TeeError> {
-        if let Some(code) = self.contracts.read().await.get(contract_address) {
+        // Get code and release lock before hashing
+        let code_opt = {
+            let contracts = self.contracts.read().await;
+            if let Some(code) = contracts.get(contract_address) {
+                Some(code.clone())
+            } else {
+                None
+            }
+        };
+        
+        if let Some(code) = code_opt {
             let mut hasher = Sha256::new();
             hasher.update(code);
             Ok(hasher.finalize().to_vec())

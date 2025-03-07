@@ -3,7 +3,7 @@ use tonic::transport::Channel;
 use tonic::Request;
 use hex;
 use tee_controller::proto::teeservice::tee_execution_client::TeeExecutionClient;
-use tee_controller::proto::teeservice::{ExecutionRequest, CreateContractRequest, GetRegionsRequest, GetAttestationsRequest};
+use tee_controller::proto::teeservice::{ExecutionRequest, GetRegionsRequest, GetAttestationsRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let attestations_response = client.get_attestations(attestations_request).await?;
     println!("Attestations: {:?}", attestations_response);
 
+    /* Note: The create_contract RPC is not yet implemented in the gRPC service
     // Create contract
     let contract_code = include_bytes!("../../../target/wasm32-unknown-unknown/debug/tee_contract.wasm");
     let contract_code_bytes = if contract_code.len() > 4_000_000 {
@@ -28,14 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         contract_code.to_vec()
     };
-    let create_response = client
-        .create_contract(Request::new(CreateContractRequest {
-            wasm_code: contract_code_bytes,
-            region_id: "simulator".to_string(),
-        }))
-        .await?;
-    let contract_address = create_response.into_inner().address;
-    println!("Contract created with address: {}", contract_address);
+    */
+
+    // For now, use a hardcoded contract address for testing
+    let contract_address = "simulator-contract-123".to_string();
+    println!("Using test contract with address: {}", contract_address);
 
     // Execute contract
     let result = client

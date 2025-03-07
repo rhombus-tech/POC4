@@ -20,10 +20,11 @@ borsh = { version = "1.2", features = ["derive"] }
 borsh-derive = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.0", features = ["sync", "macros"] }
-wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["test"] }
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["simulator", "test"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
@@ -32,3 +33,4 @@ wasm-bindgen-futures = "0.4"
 tonic-build = { workspace = true }
 
 [dev-dependencies]
+wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["simulator", "test"] }

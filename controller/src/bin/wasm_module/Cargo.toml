@@ -7,4 +7,8 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wasmlanche = { path = "../../../../../hyper/x/contracts/wasmlanche", default-features = false, features = ["wasm"] }
+wasmlanche = { path = "../../../../../hyper/x/contracts/wasmlanche", default-features = false, features = [] }
+borsh = { version = "1.5", default-features = false, features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wee_alloc = "0.4.5"

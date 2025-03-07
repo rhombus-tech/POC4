@@ -14,6 +14,9 @@ pub fn to_interface_execution_result(proto: &ProtoResult) -> InterfaceResult {
         },
         attestations: proto.attestations.iter().map(to_interface_attestation).collect(),
         timestamp: proto.timestamp.clone(),
+        operation_id: None,
+        operation_status: None,
+        pending_operations: None,
     }
 }
 
@@ -62,6 +65,16 @@ pub fn to_proto_attestation(interface: &InterfaceAttestation) -> ProtoAttestatio
             TeeType::SGX => "SGX".to_string(),
             TeeType::SEV => "SEV".to_string(),
         },
+    }
+}
+
+pub fn to_proto_region(interface: &Region) -> teeservice::Region {
+    teeservice::Region {
+        id: interface.id.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        worker_ids: interface.worker_ids.clone(),
+        supported_tee_types: vec!["SGX".to_string()],
+        max_tasks: interface.max_tasks,
     }
 }
 

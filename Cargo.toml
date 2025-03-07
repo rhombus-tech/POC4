@@ -6,7 +6,8 @@ members = [
     "controller",
     "contract",
     "controller/src/bin/wasm_module",
-    "controller/tests/contracts/simple_add"
+    "controller/tests/contracts/simple_add",
+    "wasmlanche"
 ]
 exclude = []
 

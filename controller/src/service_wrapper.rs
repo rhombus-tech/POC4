@@ -26,20 +26,47 @@ impl TeeExecution for TeeServiceWrapper {
         &self,
         request: Request<ExecutionRequest>,
     ) -> Result<Response<ExecutionResult>, Status> {
-        self.inner.read().await.execute(request).await
+        // Clone Arc to avoid holding read lock across await points
+        let inner_clone = self.inner.clone();
+        
+        // Use async block to avoid holding the lock across await points
+        let execute_future = async move {
+            let guard = inner_clone.read().await;
+            guard.execute(request).await
+        };
+        
+        execute_future.await
     }
 
     async fn get_regions(
         &self,
         request: Request<GetRegionsRequest>,
     ) -> Result<Response<GetRegionsResponse>, Status> {
-        self.inner.read().await.get_regions(request).await
+        // Clone Arc to avoid holding read lock across await points
+        let inner_clone = self.inner.clone();
+        
+        // Use async block to avoid holding the lock across await points
+        let regions_future = async move {
+            let guard = inner_clone.read().await;
+            guard.get_regions(request).await
+        };
+        
+        regions_future.await
     }
 
     async fn get_attestations(
         &self,
         request: Request<GetAttestationsRequest>,
     ) -> Result<Response<RegionAttestations>, Status> {
-        self.inner.read().await.get_attestations(request).await
+        // Clone Arc to avoid holding read lock across await points
+        let inner_clone = self.inner.clone();
+        
+        // Use async block to avoid holding the lock across await points
+        let attestations_future = async move {
+            let guard = inner_clone.read().await;
+            guard.get_attestations(request).await
+        };
+        
+        attestations_future.await
     }
 }

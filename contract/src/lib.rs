@@ -57,6 +57,9 @@ impl TeeContract {
             stats,
             attestations,
             timestamp,
+            operation_id: None,
+            operation_status: None,
+            pending_operations: None,
         })
     }
 }
@@ -119,7 +122,6 @@ mod tests {
 
 #[cfg(test)]
 mod simulator_tests {
-    use super::*;
     use simulator::Simulator;
     use simulator::Address;
 
@@ -129,14 +131,22 @@ mod simulator_tests {
         let contract_addr = Address::new(vec![1u8; 32]);
         
         // Create and initialize simulator
-        let mut simulator = Simulator::new(contract_addr.clone());
-        simulator.init().await;
+        let mut simulator = Simulator::new(contract_addr.clone()).await;
         
         let input = b"test input";
         
+        // First build the contract
+        let status = std::process::Command::new("cargo")
+            .args(&["build", "--target", "wasm32-unknown-unknown"])
+            .status()
+            .expect("Failed to build contract");
+        assert!(status.success(), "Failed to build contract");
+        
         // Deploy code
-        let contract_bytes = include_bytes!("../../target/wasm32-unknown-unknown/debug/tee_contract.wasm");
-        simulator.create_contract(contract_addr.to_vec(), contract_bytes.to_vec()).await.unwrap();
+        let contract_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/wasm32-unknown-unknown/debug/tee_contract.wasm");
+        let contract_bytes = std::fs::read(contract_path).expect("Failed to read contract bytes");
+        simulator.create_contract(contract_addr.to_vec(), contract_bytes).await.unwrap();
         
         // Execute the contract
         let result = simulator.execute(&contract_addr.to_vec(), "execute", input, 1000000).await.unwrap();
