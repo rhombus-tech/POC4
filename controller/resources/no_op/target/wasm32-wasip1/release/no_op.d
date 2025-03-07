@@ -1,0 +1,1 @@
+/Users/talzisckind/Downloads/aristo-fresh\ 2/execution/controller/resources/no_op/target/wasm32-wasip1/release/no_op.wasm: /Users/talzisckind/Downloads/aristo-fresh\ 2/execution/controller/resources/no_op/src/lib.rs

@@ -10,6 +10,8 @@ use crate::proto::teeservice::{
     GetRegionsResponse,
     GetAttestationsRequest,
     RegionAttestations,
+    DeployContractRequest,
+    DeployContractResponse,
 };
 use crate::proto::conversions::{
     to_proto_execution_result, 
@@ -18,12 +20,34 @@ use crate::proto::conversions::{
 };
 
 pub struct TeeServer {
-    executor: Box<dyn TeeExecutor + Send + Sync>,
+    executor: Arc<dyn TeeExecutor + Send + Sync>,
 }
 
 impl TeeServer {
-    pub fn new(executor: Box<dyn TeeExecutor + Send + Sync>) -> Self {
+    pub fn new(executor: Arc<dyn TeeExecutor + Send + Sync>) -> Self {
         Self { executor }
+    }
+    
+    pub async fn serve(&self, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+        let addr = format!("0.0.0.0:{}", port).parse().unwrap();
+        
+        // Create a locked reference to self
+        let server_arc = Arc::new(RwLock::new(TeeServer {
+            executor: self.executor.clone(),
+        }));
+        
+        // Create the gRPC service
+        let svc = crate::proto::teeservice::tee_execution_server::TeeExecutionServer::new(
+            TeeExecutionWrapper::new(server_arc)
+        );
+        
+        // Start the server
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve(addr)
+            .await?;
+        
+        Ok(())
     }
 }
 
@@ -86,6 +110,22 @@ impl TeeExecution for TeeExecutionWrapper {
         
         attestations_future.await
     }
+
+    async fn deploy_contract(
+        &self,
+        request: Request<DeployContractRequest>,
+    ) -> Result<Response<DeployContractResponse>, Status> {
+        // Clone Arc to avoid holding read lock across await points
+        let inner_clone = self.inner.clone();
+        
+        // Use async block to avoid holding the lock across await points
+        let deploy_future = async move {
+            let guard = inner_clone.read().await;
+            guard.deploy_contract(request).await
+        };
+        
+        deploy_future.await
+    }
 }
 
 #[tonic::async_trait]
@@ -137,6 +177,30 @@ impl TeeExecution for TeeServer {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(RegionAttestations {
+            attestations: attestations.iter().map(to_proto_attestation).collect(),
+        }))
+    }
+    
+    async fn deploy_contract(
+        &self,
+        request: Request<DeployContractRequest>,
+    ) -> Result<Response<DeployContractResponse>, Status> {
+        let req = request.into_inner();
+        
+        let contract_id = self.executor
+            .deploy_contract(&req.contract_bytes, &req.region_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            
+        // Get attestations for the deployed contract
+        let attestations = self.executor
+            .get_attestations(&req.region_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            
+        Ok(Response::new(DeployContractResponse {
+            contract_id,
+            timestamp: chrono::Utc::now().to_rfc3339(),
             attestations: attestations.iter().map(to_proto_attestation).collect(),
         }))
     }

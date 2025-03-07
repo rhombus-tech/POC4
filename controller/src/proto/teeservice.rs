@@ -127,6 +127,32 @@ pub struct GetAttestationsRequest {
     #[prost(string, tag = "1")]
     pub region_id: ::prost::alloc::string::String,
 }
+/// New message types for contract deployment
+#[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeployContractRequest {
+    /// WebAssembly bytecode to deploy
+    #[prost(bytes = "vec", tag = "1")]
+    pub contract_bytes: ::prost::alloc::vec::Vec<u8>,
+    /// Region to deploy the contract to
+    #[prost(string, tag = "2")]
+    pub region_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeployContractResponse {
+    /// Unique identifier for the deployed contract
+    #[prost(string, tag = "1")]
+    pub contract_id: ::prost::alloc::string::String,
+    /// Timestamp of deployment
+    #[prost(string, tag = "2")]
+    pub timestamp: ::prost::alloc::string::String,
+    /// Optional attestations for the deployment
+    #[prost(message, repeated, tag = "3")]
+    pub attestations: ::prost::alloc::vec::Vec<TeeAttestation>,
+}
 /// Generated client implementations.
 pub mod tee_execution_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
@@ -287,6 +313,31 @@ pub mod tee_execution_client {
                 .insert(GrpcMethod::new("teeservice.TeeExecution", "GetAttestations"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn deploy_contract(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeployContractRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeployContractResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/teeservice.TeeExecution/DeployContract",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("teeservice.TeeExecution", "DeployContract"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -312,6 +363,13 @@ pub mod tee_execution_server {
             request: tonic::Request<super::GetAttestationsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RegionAttestations>,
+            tonic::Status,
+        >;
+        async fn deploy_contract(
+            &self,
+            request: tonic::Request<super::DeployContractRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeployContractResponse>,
             tonic::Status,
         >;
     }
@@ -517,6 +575,52 @@ pub mod tee_execution_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = GetAttestationsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/teeservice.TeeExecution/DeployContract" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeployContractSvc<T: TeeExecution>(pub Arc<T>);
+                    impl<
+                        T: TeeExecution,
+                    > tonic::server::UnaryService<super::DeployContractRequest>
+                    for DeployContractSvc<T> {
+                        type Response = super::DeployContractResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeployContractRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as TeeExecution>::deploy_contract(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = DeployContractSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

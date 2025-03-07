@@ -1,7 +1,7 @@
 use std::error::Error;
 use tonic::{Request, Status};
-use tee_controller::server::teeservice::tee_execution_client::TeeExecutionClient;
-use tee_controller::server::teeservice::{self, ExecutionRequest, ExecutionResult, TeeAttestation};
+use tee_controller::proto::teeservice::tee_execution_client::TeeExecutionClient;
+use tee_controller::proto::teeservice::{self, ExecutionRequest, ExecutionResult, TeeAttestation};
 
 // Mock WASM module header - this is just for testing, not a real WASM module
 const MOCK_WASM: &[u8] = &[0x00, 0x61, 0x73, 0x6D];

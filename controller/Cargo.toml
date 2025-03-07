@@ -41,6 +41,16 @@ chrono = "0.4"
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
+log = "0.4"
+env_logger = "0.10.0"
+
+[[bin]]
+name = "tee-controller"
+path = "src/bin/tee_controller.rs"
+
+[[bin]]
+name = "test-client"
+path = "src/bin/test_client.rs"
 
 [build-dependencies]
 tonic-build = "0.11"
