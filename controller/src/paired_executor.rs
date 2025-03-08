@@ -3,6 +3,7 @@ use tokio::sync::RwLock;
 use log::{info, warn, error};
 use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region};
 use async_trait::async_trait;
+use chrono::{Utc, Duration};
 
 /// TeeExecutorPair combines two TeeExecutor instances
 /// for redundant execution and cross-checking results
@@ -52,6 +53,9 @@ impl TeeExecutor for TeeExecutorPair {
         info!("Executing contract on both TEEs for operation {}", 
               payload.operation_id.as_deref().unwrap_or("unknown"));
         
+        // Track start time for overall execution
+        let start_time = Utc::now();
+        
         // Execute on primary TEE
         let primary_executor = self.primary.read().await;
         let primary_result = (*primary_executor).execute(payload).await?;
@@ -59,6 +63,9 @@ impl TeeExecutor for TeeExecutorPair {
         // Execute on secondary TEE
         let secondary_executor = self.secondary.read().await;
         let secondary_result = (*secondary_executor).execute(payload).await?;
+        
+        // Calculate total execution time
+        let execution_time = Utc::now().signed_duration_since(start_time).num_milliseconds() as u64;
         
         // Verify that both TEEs produced the same result
         if primary_result.result != secondary_result.result {
@@ -70,9 +77,12 @@ impl TeeExecutor for TeeExecutorPair {
         let mut combined_attestations = primary_result.attestations.clone();
         combined_attestations.extend(secondary_result.attestations);
         
-        // Create result with combined attestations
+        // Create result with combined attestations and stats
         let mut result = primary_result;
         result.attestations = combined_attestations;
+        
+        // Ensure execution stats are properly populated
+        result.stats.execution_time = execution_time.max(result.stats.execution_time);
         
         info!("Contract executed successfully with matching results on both TEEs");
         Ok(result)

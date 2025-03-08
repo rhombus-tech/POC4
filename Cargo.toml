@@ -7,6 +7,10 @@ members = [
     "contract",
     "controller/src/bin/wasm_module",
     "controller/tests/contracts/simple_add",
+    "controller/tests/contracts/simple_multiply",
+    "controller/tests/contracts/token_transfer",
+    "controller/tests/contracts/key_value_store", 
+    "controller/tests/contracts/data_oracle",
     "wasmlanche"
 ]
 exclude = []

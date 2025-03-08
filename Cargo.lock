@@ -847,6 +847,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "data_oracle"
+version = "0.1.0"
+dependencies = [
+ "borsh 1.5.5",
+ "wasmlanche",
+ "wee_alloc",
+]
+
+[[package]]
 name = "debugid"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1454,6 +1463,15 @@ checksum = "1cfaf33c695fc6e08064efbc1f72ec937429614f25eef83af942d0e227c3a28f"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "key_value_store"
+version = "0.1.0"
+dependencies = [
+ "borsh 1.5.5",
+ "wasmlanche",
+ "wee_alloc",
 ]
 
 [[package]]
@@ -2184,6 +2202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "simple_multiply"
+version = "0.1.0"
+dependencies = [
+ "borsh 1.5.5",
+ "wasmlanche",
+ "wee_alloc",
+]
+
+[[package]]
 name = "simulator"
 version = "0.1.0"
 dependencies = [
@@ -2406,6 +2433,15 @@ checksum = "8b9ef9bad013ada3808854ceac7b46812a6465ba368859a37e2100283d2d719c"
 dependencies = [
  "cfg-if 1.0.0",
  "once_cell",
+]
+
+[[package]]
+name = "token_transfer"
+version = "0.1.0"
+dependencies = [
+ "borsh 1.5.5",
+ "wasmlanche",
+ "wee_alloc",
 ]
 
 [[package]]
