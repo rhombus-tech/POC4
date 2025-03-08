@@ -21,6 +21,10 @@ struct Args {
     /// Use simulation mode instead of real TEE
     #[clap(short, long)]
     simulate: bool,
+    
+    /// Bypass attestation verification for testing on real hardware
+    #[clap(long)]
+    bypass_attestation: bool,
 }
 
 #[tokio::main]
@@ -35,17 +39,23 @@ async fn main() -> Result<(), std::io::Error> {
     
     info!("Starting TEE Controller with base directory: {:?}", args.base_dir);
     
-    // Create the SGX and SEV TEE executors
-    let mut sgx_controller = EnarxController::new(
+    if args.bypass_attestation {
+        info!("ATTESTATION BYPASS MODE ENABLED - This should only be used for testing!");
+    }
+    
+    // Create the SGX and SEV TEE executors with bypass_attestation option
+    let mut sgx_controller = EnarxController::new_with_options(
         "SGX".to_string(), 
         args.base_dir.join("sgx"), 
-        args.simulate
+        args.simulate,
+        args.bypass_attestation
     );
     
-    let mut sev_controller = EnarxController::new(
+    let mut sev_controller = EnarxController::new_with_options(
         "SEV".to_string(), 
         args.base_dir.join("sev"), 
-        args.simulate
+        args.simulate,
+        args.bypass_attestation
     );
     
     // Initialize both controllers

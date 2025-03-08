@@ -22,6 +22,74 @@ fn add_impl(_context: &mut Context, a: i32, b: i32) -> i32 {
     a + b
 }
 
+/// Read integer parameters from memory
+/// Supports both length-prefixed and direct parameter formats
+#[cfg(target_arch = "wasm32")]
+fn read_input_params(input_offset: i32) -> (i32, i32) {
+    // Safety bounds - don't try to read unreasonable amounts of memory
+    const MAX_PARAM_SIZE: usize = 1024;
+    
+    unsafe {
+        let input_ptr = input_offset as *const u8;
+        
+        // First check if this could be a length-prefixed format
+        // by reading the first 4 bytes as a potential length
+        let potential_length = if input_offset >= 4 {
+            let length_bytes = core::slice::from_raw_parts(input_ptr, 4);
+            u32::from_le_bytes([
+                length_bytes[0], 
+                length_bytes[1], 
+                length_bytes[2], 
+                length_bytes[3]
+            ])
+        } else {
+            // If the offset is less than 4, we can't possibly have a length prefix
+            0
+        };
+        
+        // If the length seems reasonable, treat as length-prefixed format
+        if potential_length > 0 && potential_length <= MAX_PARAM_SIZE as u32 {
+            // This is likely a length-prefixed parameter
+            // Read the actual parameters after the length prefix
+            let param_ptr = input_ptr.add(4);
+            let param_slice = core::slice::from_raw_parts(param_ptr, core::cmp::min(potential_length as usize, MAX_PARAM_SIZE));
+            
+            // Parse parameters (assuming comma-separated values like "42,58")
+            if let Some(comma_pos) = param_slice.iter().position(|&b| b == b',') {
+                let a_slice = &param_slice[..comma_pos];
+                let b_slice = &param_slice[(comma_pos + 1)..];
+                
+                // Try to convert slices to strings and parse them
+                if let (Ok(a_str), Ok(b_str)) = (
+                    core::str::from_utf8(a_slice),
+                    core::str::from_utf8(b_slice)
+                ) {
+                    if let (Ok(a), Ok(b)) = (a_str.parse::<i32>(), b_str.parse::<i32>()) {
+                        return (a, b);
+                    }
+                }
+            }
+            
+            // Fallback if comma parsing failed - assume single value
+            if let Ok(param_str) = core::str::from_utf8(param_slice) {
+                if let Ok(value) = param_str.parse::<i32>() {
+                    return (value, 0); // Default second parameter to 0
+                }
+            }
+        }
+        
+        // Direct parameter format - use the input_offset directly as first parameter
+        // and provide a default for the second parameter
+        (input_offset, 0)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_input_params(input_offset: i32) -> (i32, i32) {
+    // For non-wasm builds, just return the input as first parameter
+    (input_offset, 0)
+}
+
 // Direct export function for add (without the 'export_' prefix)
 // This matches what the Go tests are looking for
 #[no_mangle]
@@ -29,10 +97,8 @@ pub extern "C" fn add_direct(input_offset: i32) -> i32 {
     // Create a new context
     let mut ctx = Context::new();
     
-    // For this simple case, we're just going to parse two numbers from the input
-    // and return their sum directly
-    let a = input_offset;
-    let b = 2; // Example default value
+    // Read parameters using our helper function that handles both formats
+    let (a, b) = read_input_params(input_offset);
     
     // Call the implementation
     add_impl(&mut ctx, a, b)

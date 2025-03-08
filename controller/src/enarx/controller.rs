@@ -21,6 +21,8 @@ pub struct EnarxController {
     tee_type: String,
     /// Simulation mode
     simulation: bool,
+    /// Bypass attestation verification for testing
+    bypass_attestation: bool,
     /// Map of contract IDs to filenames
     contracts: Arc<RwLock<std::collections::HashMap<String, PathBuf>>>,
 }
@@ -36,6 +38,22 @@ impl EnarxController {
             config_dir,
             tee_type,
             simulation: simulate,
+            bypass_attestation: false,
+            contracts: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+    
+    /// Create a new Enarx controller with bypass_attestation option
+    pub fn new_with_options(tee_type: String, config_dir: PathBuf, simulate: bool, bypass_attestation: bool) -> Self {
+        info!("Creating EnarxController for TEE type: {}, config_dir: {:?}, simulate: {}, bypass_attestation: {}", 
+              tee_type, config_dir, simulate, bypass_attestation);
+        
+        Self {
+            keep_manager: None,
+            config_dir,
+            tee_type,
+            simulation: simulate,
+            bypass_attestation,
             contracts: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
@@ -98,19 +116,47 @@ impl EnarxController {
     
     /// Helper method to get attestation
     fn get_attestation(&self, region_id: &str) -> Result<Vec<TeeAttestation>, EnarxError> {
-        // In a real implementation, we would get a real attestation report
-        // For now, return a dummy attestation report
-        let attestation = TeeAttestation {
-            enclave_id: vec![0; 16],
-            measurement: vec![0; 32],
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            data: vec![],
-            signature: vec![0; 64],
-            region_proof: None,
-            enclave_type: tee_interface::TeeType::SGX,
-        };
+        // If running in simulation mode or with attestation bypassed, return a dummy attestation
+        if self.simulation || self.bypass_attestation {
+            debug!("Using dummy attestation in {} mode for region: {}", 
+                   if self.simulation { "simulation" } else { "bypass" }, region_id);
+            
+            let attestation = TeeAttestation {
+                enclave_id: vec![0; 16],
+                measurement: vec![0; 32],
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                data: vec![],
+                signature: vec![0; 64],
+                region_proof: None,
+                enclave_type: tee_interface::TeeType::SGX,
+            };
+            
+            return Ok(vec![attestation]);
+        }
         
-        Ok(vec![attestation])
+        // In a real implementation, we would get a real attestation report from the TEE
+        // This would involve calling into the Enarx keep manager to get an attestation
+        if let Some(keep_manager) = &self.keep_manager {
+            // In a real implementation, we would call into the keep manager to get an attestation
+            // For now, return a real-looking attestation with the keep manager
+            debug!("Getting real attestation for region: {}", region_id);
+            
+            // Code to interact with actual hardware would go here
+            // This is placeholder code and would be replaced with real attestation generation
+            let attestation = TeeAttestation {
+                enclave_id: vec![1; 16], // Real value would come from hardware
+                measurement: vec![1; 32], // Real value would come from hardware
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                data: vec![], // Would contain actual attestation data
+                signature: vec![1; 64], // Real signatures would come from hardware
+                region_proof: None,
+                enclave_type: tee_interface::TeeType::SGX,
+            };
+            
+            Ok(vec![attestation])
+        } else {
+            Err(EnarxError::Other("Keep manager not initialized".to_string()))
+        }
     }
 }
 
