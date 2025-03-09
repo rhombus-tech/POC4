@@ -7,6 +7,7 @@ use tonic::service::interceptor::InterceptedService;
 use tracing::{debug, error, info, warn};
 use std::net::SocketAddr;
 use chrono::Utc;
+use tee_interface::RegionInfo;
 
 use crate::proto::teeservice::{
     ExecutionRequest, ExecutionResult, 

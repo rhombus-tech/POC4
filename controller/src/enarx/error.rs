@@ -15,6 +15,8 @@ pub enum EnarxError {
     StateError(String),
     /// Error with I/O operations
     IoError(std::io::Error),
+    /// Error with file operations
+    FileError(String),
     /// Other error types
     Other(String),
 }
@@ -27,6 +29,7 @@ impl fmt::Display for EnarxError {
             Self::DeploymentError(msg) => write!(f, "Deployment error: {}", msg),
             Self::StateError(msg) => write!(f, "State error: {}", msg),
             Self::IoError(e) => write!(f, "I/O error: {}", e),
+            Self::FileError(msg) => write!(f, "File error: {}", msg),
             Self::Other(msg) => write!(f, "Other error: {}", msg),
         }
     }
@@ -48,6 +51,7 @@ impl From<EnarxError> for TeeError {
             EnarxError::DeploymentError(msg) => TeeError::Contract(msg),
             EnarxError::StateError(msg) => TeeError::Contract(msg),
             EnarxError::IoError(e) => TeeError::ExecutionError(format!("I/O error: {}", e)),
+            EnarxError::FileError(msg) => TeeError::ExecutionError(msg),
             EnarxError::Other(msg) => TeeError::ExecutionError(msg),
         }
     }

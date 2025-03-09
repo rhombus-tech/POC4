@@ -105,6 +105,13 @@ pub mod types {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+    pub struct RegionInfo {
+        pub id: String,
+        pub worker_ids: Vec<String>,
+        pub max_tasks: u32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     pub enum TeeType {
         SGX,
         SEV,
@@ -190,7 +197,7 @@ pub trait TeeExecutor: Send + Sync {
         payload: &ExecutionPayload,
     ) -> Result<ExecutionResult, TeeError>;
 
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError>;
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError>;
 
     async fn get_attestations(
         &self,

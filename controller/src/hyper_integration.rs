@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use async_trait::async_trait;
-use tee_interface::{TeeExecutor, ExecutionPayload, ExecutionResult, TeeError, ExecutionStats, TeeAttestation, TeeType, Region};
+use tee_interface::{TeeExecutor, ExecutionPayload, ExecutionResult, TeeError, ExecutionStats, TeeAttestation, TeeType, RegionInfo};
+use crate::proto::teeservice::Region;
 use crate::simulator::Simulator;
 use wasmlanche::types::WasmlAddress;
 use uuid::Uuid;
@@ -419,7 +420,9 @@ impl HyperTeeController {
         if region_id == "default" || region_id == "sgx-001" {
             Ok(Some(Region {
                 id: region_id.to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
                 worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
+                supported_tee_types: vec!["SGX".to_string()],
                 max_tasks: 100,
             }))
         } else {
@@ -1119,20 +1122,20 @@ impl HyperTeeController {
         }
     }
 
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Return mock regions for testing with the correct fields
         Ok(vec![
-            Region {
+            RegionInfo {
                 id: "sgx-region-1".to_string(),
                 worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
                 max_tasks: 100,
             },
-            Region {
+            RegionInfo {
                 id: "sgx-region-2".to_string(),
                 worker_ids: vec!["worker-3".to_string(), "worker-4".to_string()],
                 max_tasks: 100,
             },
-            Region {
+            RegionInfo {
                 id: "sev-region-1".to_string(),
                 worker_ids: vec!["worker-5".to_string(), "worker-6".to_string()],
                 max_tasks: 100,
@@ -1456,9 +1459,9 @@ impl TeeExecutor for HyperTeeController {
         }
     }
     
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Mock implementation for testing
-        let region = Region {
+        let region = RegionInfo {
             id: "test-region".to_string(),
             worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
             max_tasks: 10,

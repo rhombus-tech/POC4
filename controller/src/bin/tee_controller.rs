@@ -4,6 +4,7 @@ use tokio::sync::RwLock;
 use clap::Parser;
 use log::{info, error};
 use tee_controller::enarx::controller::EnarxController;
+use tee_interface::types::TeeType;
 use tee_controller::paired_executor::TeeExecutorPair;
 use tee_controller::server::TeeServer;
 
@@ -36,36 +37,37 @@ async fn main() -> Result<(), std::io::Error> {
     info!("Starting TEE Controller with base directory: {:?}", args.base_dir);
     
     // Create the SGX and SEV TEE executors
-    let mut sgx_controller = EnarxController::new(
-        "SGX".to_string(), 
-        args.base_dir.join("sgx"), 
+    let sgx_controller = match EnarxController::new(
+        TeeType::SGX, 
+        args.base_dir.join("sgx").to_str().unwrap_or("./sgx"), 
         args.simulate
-    );
+    ).await {
+        Ok(controller) => controller,
+        Err(e) => {
+            error!("Failed to initialize SGX controller: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("SGX initialization error: {:?}", e)
+            ));
+        }
+    };
     
-    let mut sev_controller = EnarxController::new(
-        "SEV".to_string(), 
-        args.base_dir.join("sev"), 
+    let sev_controller = match EnarxController::new(
+        TeeType::SEV, 
+        args.base_dir.join("sev").to_str().unwrap_or("./sev"), 
         args.simulate
-    );
+    ).await {
+        Ok(controller) => controller,
+        Err(e) => {
+            error!("Failed to initialize SEV controller: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("SEV initialization error: {:?}", e)
+            ));
+        }
+    };
     
-    // Initialize both controllers
-    if let Err(e) = sgx_controller.initialize().await {
-        error!("Failed to initialize SGX controller: {:?}", e);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other, 
-            format!("SGX initialization error: {:?}", e)
-        ));
-    }
-    
-    if let Err(e) = sev_controller.initialize().await {
-        error!("Failed to initialize SEV controller: {:?}", e);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other, 
-            format!("SEV initialization error: {:?}", e)
-        ));
-    }
-    
-    // Wrap the controllers in Arc<RwLock<>>
+    // Wrap the controllers in Arc<RwLock>
     let sgx = Arc::new(RwLock::new(sgx_controller));
     let sev = Arc::new(RwLock::new(sev_controller));
     

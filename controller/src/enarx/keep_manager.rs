@@ -1,10 +1,82 @@
 use std::path::Path;
 use std::process::Command;
+use std::process::Child;
 use std::io::Write;
-use log::{debug, info, error};
+use log::{debug, info, error, warn};
 use crate::enarx::error::EnarxError;
 use tee_interface::TeeError;
 use std::env;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+use which::which;
+
+/// Status of a keep in the pool
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepStatus {
+    /// Keep is initialized and ready for use
+    Ready,
+    /// Keep is being used for execution
+    InUse,
+    /// Keep is being initialized
+    Initializing,
+    /// Keep has failed and should be removed
+    Failed,
+}
+
+/// A representation of an Enarx keep process
+#[derive(Debug)]
+pub struct Keep {
+    /// Unique ID for this keep
+    pub id: String,
+    /// Status of this keep
+    pub status: KeepStatus,
+    /// Time when this keep was created
+    pub created_at: Instant,
+    /// Time when this keep was last used
+    pub last_used: Option<Instant>,
+    /// Process handle for the keep
+    pub process: Option<Child>,
+    /// TEE type of this keep
+    pub tee_type: String,
+}
+
+impl Keep {
+    /// Create a new keep with the given ID
+    pub fn new(id: String, tee_type: String) -> Self {
+        Self {
+            id,
+            status: KeepStatus::Initializing,
+            created_at: Instant::now(),
+            last_used: None,
+            process: None,
+            tee_type,
+        }
+    }
+
+    /// Check if this keep is available for use
+    pub fn is_available(&self) -> bool {
+        self.status == KeepStatus::Ready
+    }
+
+    /// Mark this keep as in use
+    pub fn mark_in_use(&mut self) {
+        self.status = KeepStatus::InUse;
+        self.last_used = Some(Instant::now());
+    }
+
+    /// Mark this keep as ready for use
+    pub fn mark_ready(&mut self) {
+        self.status = KeepStatus::Ready;
+    }
+
+    /// Mark this keep as failed
+    pub fn mark_failed(&mut self) {
+        self.status = KeepStatus::Failed;
+    }
+}
 
 /// Configuration for the Enarx Keep Manager
 #[derive(Debug, Clone)]
@@ -15,6 +87,12 @@ pub struct KeepManagerConfig {
     pub max_keeps: usize,
     /// Number of warm keeps to maintain
     pub warm_keeps: usize,
+    /// Maximum lifetime of a keep in seconds
+    pub keep_max_lifetime: u64,
+    /// Maximum idle time of a keep in seconds
+    pub keep_max_idle_time: u64,
+    /// Initialization timeout in milliseconds
+    pub init_timeout_ms: u64,
 }
 
 impl Default for KeepManagerConfig {
@@ -24,6 +102,9 @@ impl Default for KeepManagerConfig {
                 .unwrap_or_else(|_| "/usr/local/bin/enarx".to_string()),
             max_keeps: 10,
             warm_keeps: 2,
+            keep_max_lifetime: 3600, // 1 hour
+            keep_max_idle_time: 300, // 5 minutes
+            init_timeout_ms: 5000,   // 5 seconds
         }
     }
 }
@@ -32,18 +113,41 @@ impl Default for KeepManagerConfig {
 pub struct KeepManager {
     config: KeepManagerConfig,
     enarx_path: String,
+    /// Pool of available keeps
+    keeps: Arc<RwLock<HashMap<String, Keep>>>,
+    /// Queue of keeps that are ready for use
+    ready_queue: Arc<Mutex<VecDeque<String>>>,
+    /// Is the manager initialized
+    initialized: Arc<RwLock<bool>>,
 }
 
 impl KeepManager {
     /// Create a new Keep Manager with the specified configuration
     pub fn new(config: KeepManagerConfig) -> Self {
-        let enarx_path = env::var("ENARX_PATH").unwrap_or_else(|_| "enarx".to_string());
-        Self { config, enarx_path }
+        let enarx_path = match which("enarx") {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(_) => config.enarx_path.clone(),
+        };
+        
+        Self { 
+            config, 
+            enarx_path,
+            keeps: Arc::new(RwLock::new(HashMap::new())),
+            ready_queue: Arc::new(Mutex::new(VecDeque::new())),
+            initialized: Arc::new(RwLock::new(false)),
+        }
     }
     
     /// Initialize the Keep Manager
     pub async fn initialize(&self) -> Result<(), EnarxError> {
-        info!("Initializing Keep Manager with max_keeps={}", self.config.max_keeps);
+        let mut initialized = self.initialized.write().await;
+        if *initialized {
+            debug!("Keep Manager is already initialized");
+            return Ok(());
+        }
+        
+        info!("Initializing Keep Manager with max_keeps={}, warm_keeps={}", 
+              self.config.max_keeps, self.config.warm_keeps);
         
         if self.config.enarx_path.is_empty() {
             return Err(EnarxError::KeepManagerError("Enarx binary path not set".to_string()));
@@ -56,8 +160,7 @@ impl KeepManager {
             ));
         }
         
-        // TODO: Test that we can run the enarx binary
-        // For now, just check if we can run a simple command
+        // Check if we can run a simple command
         let output = Command::new(&self.config.enarx_path)
             .arg("--version")
             .output()
@@ -68,102 +171,303 @@ impl KeepManager {
             return Err(EnarxError::KeepManagerError(format!("Enarx failed: {}", stderr)));
         }
         
-        info!("Enarx binary validated successfully");
+        info!("Enarx binary validated successfully at {}", self.config.enarx_path);
         
-        // In a real implementation, we would initialize a pool of Enarx keeps here
-        // This would involve starting Enarx processes and preparing them for execution
+        // Start the background task for managing warm keeps
+        self.start_keep_manager_task();
+        
+        // Initialize warm keeps
+        self.ensure_warm_keeps().await?;
+        
+        *initialized = true;
+        Ok(())
+    }
+    
+    /// Start a background task to manage the pool of keeps
+    fn start_keep_manager_task(&self) {
+        let keeps = self.keeps.clone();
+        let ready_queue = self.ready_queue.clone();
+        let config = self.config.clone();
+        let enarx_path = self.enarx_path.clone();
+        let initialized = self.initialized.clone();
+        
+        tokio::spawn(async move {
+            info!("Starting keep manager background task");
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            
+            loop {
+                interval.tick().await;
+                
+                // Only run if initialized
+                if !*initialized.read().await {
+                    continue;
+                }
+                
+                // Clean up stale keeps
+                Self::cleanup_stale_keeps(&keeps, &ready_queue, &config).await;
+                
+                // Ensure we have enough warm keeps
+                if let Err(e) = Self::replenish_warm_keeps(&keeps, &ready_queue, &config, &enarx_path).await {
+                    error!("Failed to replenish warm keeps: {}", e);
+                }
+            }
+        });
+    }
+    
+    /// Clean up keeps that have been running too long or idle too long
+    async fn cleanup_stale_keeps(
+        keeps: &Arc<RwLock<HashMap<String, Keep>>>,
+        ready_queue: &Arc<Mutex<VecDeque<String>>>,
+        config: &KeepManagerConfig,
+    ) {
+        let now = Instant::now();
+        let mut keeps_to_remove = Vec::new();
+        
+        // Find keeps to remove
+        {
+            let keeps_guard = keeps.read().await;
+            for (id, keep) in keeps_guard.iter() {
+                // Remove keeps that have been running too long
+                if now.duration_since(keep.created_at).as_secs() > config.keep_max_lifetime {
+                    keeps_to_remove.push(id.clone());
+                    continue;
+                }
+                
+                // Remove keeps that have been idle too long
+                if let Some(last_used) = keep.last_used {
+                    if keep.status == KeepStatus::Ready && 
+                       now.duration_since(last_used).as_secs() > config.keep_max_idle_time {
+                        keeps_to_remove.push(id.clone());
+                    }
+                }
+                
+                // Remove failed keeps
+                if keep.status == KeepStatus::Failed {
+                    keeps_to_remove.push(id.clone());
+                }
+            }
+        }
+        
+        // Remove keeps
+        if !keeps_to_remove.is_empty() {
+            info!("Cleaning up {} stale keeps", keeps_to_remove.len());
+            let mut keeps_guard = keeps.write().await;
+            let mut ready_queue_guard = ready_queue.lock().unwrap();
+            
+            for id in keeps_to_remove {
+                if let Some(mut keep) = keeps_guard.remove(&id) {
+                    // Kill the process if it's still running
+                    if let Some(mut process) = keep.process.take() {
+                        debug!("Killing keep process for {}", id);
+                        let _ = process.kill();
+                    }
+                    
+                    // Remove from ready queue
+                    ready_queue_guard.retain(|keep_id| keep_id != &id);
+                }
+            }
+        }
+    }
+    
+    /// Ensure we have enough warm keeps
+    async fn replenish_warm_keeps(
+        keeps: &Arc<RwLock<HashMap<String, Keep>>>,
+        ready_queue: &Arc<Mutex<VecDeque<String>>>,
+        config: &KeepManagerConfig,
+        enarx_path: &str,
+    ) -> Result<(), EnarxError> {
+        let warm_keeps_count = {
+            let ready_queue_guard = ready_queue.lock().unwrap();
+            ready_queue_guard.len()
+        };
+        
+        let needed = config.warm_keeps.saturating_sub(warm_keeps_count);
+        if needed == 0 {
+            return Ok(());
+        }
+        
+        info!("Replenishing warm keeps: {} needed", needed);
+        
+        // Check if we can create more keeps
+        let current_keeps_count = {
+            let keeps_guard = keeps.read().await;
+            keeps_guard.len()
+        };
+        
+        if current_keeps_count >= config.max_keeps {
+            warn!("Cannot create more keeps: reached max_keeps ({})", config.max_keeps);
+            return Ok(());
+        }
+        
+        // Create new keeps
+        let to_create = std::cmp::min(needed, config.max_keeps - current_keeps_count);
+        for _ in 0..to_create {
+            // Create a new keep
+            let keep_id = Uuid::new_v4().to_string();
+            let mut keep = Keep::new(keep_id.clone(), "sgx".to_string());
+            
+            // Initialize the keep
+            match Self::initialize_keep(&mut keep, enarx_path).await {
+                Ok(()) => {
+                    keep.mark_ready();
+                    
+                    // Add to keeps map
+                    let mut keeps_guard = keeps.write().await;
+                    keeps_guard.insert(keep_id.clone(), keep);
+                    
+                    // Add to ready queue
+                    let mut ready_queue_guard = ready_queue.lock().unwrap();
+                    ready_queue_guard.push_back(keep_id.clone());
+                    
+                    info!("Created new warm keep: {}", keep_id);
+                }
+                Err(e) => {
+                    error!("Failed to initialize keep: {}", e);
+                }
+            }
+        }
         
         Ok(())
+    }
+    
+    /// Initialize a new keep
+    async fn initialize_keep(keep: &mut Keep, enarx_path: &str) -> Result<(), EnarxError> {
+        debug!("Initializing keep {}", keep.id);
+        
+        // In a real implementation, we would start an Enarx process ready to accept commands
+        // For simulation purposes, we'll use a simple sleep to simulate initialization
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Simulate the process handle
+        // In a real implementation, this would be an actual subprocess
+        keep.process = None;
+        
+        Ok(())
+    }
+    
+    /// Ensure we have enough warm keeps
+    pub async fn ensure_warm_keeps(&self) -> Result<(), EnarxError> {
+        Self::replenish_warm_keeps(
+            &self.keeps,
+            &self.ready_queue,
+            &self.config,
+            &self.enarx_path,
+        ).await
+    }
+    
+    /// Get a keep from the pool
+    pub async fn get_keep(&self) -> Result<String, EnarxError> {
+        // Make sure we're initialized
+        if !*self.initialized.read().await {
+            return Err(EnarxError::KeepManagerError("Keep Manager not initialized".to_string()));
+        }
+        
+        // Try to get a keep from the ready queue
+        let keep_id = {
+            let mut ready_queue_guard = self.ready_queue.lock().unwrap();
+            ready_queue_guard.pop_front()
+        };
+        
+        if let Some(id) = keep_id {
+            // Mark the keep as in use
+            let mut keeps_guard = self.keeps.write().await;
+            if let Some(keep) = keeps_guard.get_mut(&id) {
+                keep.mark_in_use();
+                debug!("Got keep {} from pool", id);
+                return Ok(id);
+            }
+        }
+        
+        // No keep available, check if we can create a new one
+        let current_keeps_count = {
+            let keeps_guard = self.keeps.read().await;
+            keeps_guard.len()
+        };
+        
+        if current_keeps_count >= self.config.max_keeps {
+            return Err(EnarxError::KeepManagerError("No keeps available and at max capacity".to_string()));
+        }
+        
+        // Create a new keep
+        let keep_id = Uuid::new_v4().to_string();
+        let mut keep = Keep::new(keep_id.clone(), "sgx".to_string());
+        
+        // Initialize the keep
+        Self::initialize_keep(&mut keep, &self.enarx_path).await?;
+        
+        // Mark as in use and add to keeps map
+        keep.mark_in_use();
+        
+        let mut keeps_guard = self.keeps.write().await;
+        keeps_guard.insert(keep_id.clone(), keep);
+        
+        info!("Created new on-demand keep: {}", keep_id);
+        Ok(keep_id)
+    }
+    
+    /// Return a keep to the pool
+    pub async fn return_keep(&self, keep_id: &str) -> Result<(), EnarxError> {
+        let mut keeps_guard = self.keeps.write().await;
+        
+        if let Some(keep) = keeps_guard.get_mut(keep_id) {
+            keep.mark_ready();
+            
+            // Add back to ready queue
+            let mut ready_queue_guard = self.ready_queue.lock().unwrap();
+            ready_queue_guard.push_back(keep_id.to_string());
+            
+            debug!("Returned keep {} to pool", keep_id);
+            Ok(())
+        } else {
+            Err(EnarxError::KeepManagerError(format!("Keep {} not found", keep_id)))
+        }
     }
     
     /// Execute a WebAssembly contract in an Enarx keep
     pub async fn execute(&self, contract_path: &Path, params: &[u8]) -> Result<Vec<u8>, TeeError> {
         info!("Executing contract {} with {} bytes of parameters", contract_path.display(), params.len());
         
-        // In a real implementation, we would select an available keep from the pool
-        // and use it to execute the contract
-        
-        // For now, we'll execute Enarx directly for each request
-        let mut cmd = Command::new(&self.config.enarx_path);
-        cmd.arg("run")
-            .arg(contract_path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        
-        let mut child = cmd.spawn()
-            .map_err(|e| TeeError::ExecutionError(format!("Failed to start Enarx: {}", e)))?;
-        
-        // Write parameters to stdin if any
-        if !params.is_empty() {
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin.write_all(params)
-                    .map_err(|e| TeeError::ExecutionError(format!("Failed to write to stdin: {}", e)))?;
+        // Try to get a keep from the pool
+        let keep_id = match self.get_keep().await {
+            Ok(id) => id,
+            Err(e) => {
+                error!("Failed to get keep from pool: {}", e);
+                // Fall back to direct execution
+                return self.execute_with_enarx(contract_path, params).await;
             }
+        };
+        
+        // Execute the contract
+        let result = self.execute_with_keep(&keep_id, contract_path, params).await;
+        
+        // Return the keep to the pool
+        if let Err(e) = self.return_keep(&keep_id).await {
+            error!("Failed to return keep to pool: {}", e);
         }
         
-        // Get the output
-        let output = child.wait_with_output()
-            .map_err(|e| TeeError::ExecutionError(format!("Failed to wait for Enarx: {}", e)))?;
-        
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TeeError::ExecutionError(format!("Enarx execution failed: {}", stderr)));
-        }
-        
-        // Return the stdout as the result
-        Ok(output.stdout)
+        result
     }
     
-    /// Execute a WebAssembly contract using Enarx
-    ///
-    /// # Arguments
-    ///
-    /// * `contract_path` - Path to the WebAssembly contract file
-    /// * `method` - Method to execute
-    /// * `params` - Parameters for the method
-    ///
-    /// # Returns
-    ///
-    /// Execution result as bytes or error
-    pub async fn execute_contract<P: AsRef<Path>>(&self, contract_path: P, method: &str, params: &[u8]) -> Result<Vec<u8>, TeeError> {
-        let contract_path = contract_path.as_ref();
-        info!("Executing contract: {} with method: {}", contract_path.display(), method);
-        debug!("Parameter size: {} bytes", params.len());
+    /// Execute a WebAssembly contract using a specific keep
+    async fn execute_with_keep(&self, keep_id: &str, contract_path: &Path, params: &[u8]) -> Result<Vec<u8>, TeeError> {
+        debug!("Executing contract with keep {}", keep_id);
         
-        // In a real implementation, we would use Enarx to execute the contract
-        // For now, we'll simulate execution based on the method
-        if method == "add" {
-            // Simple add implementation for testing
-            let params_str = String::from_utf8_lossy(params);
-            let parts: Vec<&str> = params_str.split(',').collect();
-            
-            if parts.len() < 2 {
-                return Err(TeeError::Contract(format!(
-                    "Invalid parameters for add method. Expected 2 parameters, got {}",
-                    parts.len()
-                )));
-            }
-            
-            match (parts[0].trim().parse::<i32>(), parts[1].trim().parse::<i32>()) {
-                (Ok(a), Ok(b)) => {
-                    let result = a + b;
-                    info!("Calculated: {} + {} = {}", a, b, result);
-                    
-                    // Return the result as little-endian bytes
-                    Ok(result.to_le_bytes().to_vec())
-                },
-                _ => {
-                    Err(TeeError::Contract(format!(
-                        "Failed to parse parameters for add method: {:?}",
-                        parts
-                    )))
-                }
-            }
-        } else {
-            // Unsupported method
-            Err(TeeError::Contract(format!("Unsupported method: {}", method)))
-        }
+        // In a real implementation, we would send the contract and params to the keep
+        // and wait for the result
+        
+        // For now, we'll execute Enarx directly
+        self.execute_with_enarx(contract_path, params).await
+    }
+
+    /// Execute a WebAssembly contract with specific method and parameters
+    pub async fn execute_contract<P: AsRef<Path>>(&self, contract_path: P, method: &str, params: &[u8]) -> Result<Vec<u8>, TeeError> {
+        // Combine method and params into a single payload
+        let mut payload = Vec::new();
+        payload.extend_from_slice(method.as_bytes());
+        payload.push(0);  // Null terminator for method name
+        payload.extend_from_slice(params);
+        
+        self.execute(contract_path.as_ref(), &payload).await
     }
     
     /// Execute a WebAssembly contract using the actual Enarx binary
@@ -173,14 +477,34 @@ impl KeepManager {
     #[allow(dead_code)]
     async fn execute_with_enarx<P: AsRef<Path>>(&self, contract_path: P, params: &[u8]) -> Result<Vec<u8>, TeeError> {
         let contract_path = contract_path.as_ref();
+        debug!("Executing contract {} with Enarx binary", contract_path.display());
         
-        // Prepare the command
-        let output = Command::new(&self.enarx_path)
-            .arg("run")
-            .arg("--wasmcfgfile")
+        // Prepare the command with stdin/stdout pipes
+        let mut cmd = Command::new(&self.enarx_path);
+        cmd.arg("run")
             .arg(contract_path)
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        
+        // Spawn the process
+        let mut child = cmd.spawn()
             .map_err(|e| TeeError::ExecutionError(format!("Failed to execute Enarx: {}", e)))?;
+        
+        // Write parameters to stdin if any
+        if !params.is_empty() {
+            debug!("Writing {} bytes of parameters to Enarx stdin", params.len());
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(params)
+                    .map_err(|e| TeeError::ExecutionError(format!("Failed to write to stdin: {}", e)))?;
+            } else {
+                return Err(TeeError::ExecutionError("Failed to open stdin".to_string()));
+            }
+        }
+        
+        // Wait for the process to complete and capture output
+        let output = child.wait_with_output()
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to wait for Enarx: {}", e)))?;
         
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -188,6 +512,7 @@ impl KeepManager {
             return Err(TeeError::ExecutionError(format!("Enarx execution failed: {}", stderr)));
         }
         
+        debug!("Enarx execution completed successfully, received {} bytes of output", output.stdout.len());
         Ok(output.stdout)
     }
 }

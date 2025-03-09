@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::RwLock;
-use tee_interface::{TeeExecutor, ExecutionPayload, TeeError, TeeAttestation, Region, ExecutionResult, ExecutionStats, TeeType};
+use tee_interface::{TeeExecutor, ExecutionPayload, TeeError, TeeAttestation, RegionInfo, ExecutionResult, ExecutionStats, TeeType};
 use wasmlanche::{
     simulator::{SimulatorExt as WasmlSimulatorExt},
     types::WasmlAddress,
@@ -243,7 +243,7 @@ impl TeeExecutor for SimulatorController {
         // Check if contract exists
         let contracts = self.contracts.read().await;
         if !contracts.contains_key(&payload.params.id_to) {
-            return Err(TeeError::Contract(format!("Contract not found: {}", payload.params.id_to)));
+            return Err(TeeError::ExecutionError(format!("Contract not found: {}", payload.params.id_to)));
         }
 
         // Process input parameters
@@ -271,14 +271,14 @@ impl TeeExecutor for SimulatorController {
                 println!("Successfully calculated {} + {} = {}", num1, num2, sum);
                 sum.to_le_bytes().to_vec()
             } else {
-                return Err(TeeError::Contract(format!(
+                return Err(TeeError::ExecutionError(format!(
                     "Invalid parameters for add method. Expected 8 bytes, got {}",
                     input.len()
                 )));
             }
         } else {
             // Unsupported method
-            return Err(TeeError::Contract(format!("Unsupported method: {}", function_call)));
+            return Err(TeeError::ExecutionError(format!("Unsupported method: {}", function_call)));
         };
 
         // Return result
@@ -294,9 +294,9 @@ impl TeeExecutor for SimulatorController {
                 enclave_id: b"simulator".to_vec(),
                 measurement: vec![0; 32],
                 timestamp: chrono::Utc::now().timestamp() as u64,
-                signature: vec![0; 64],
-                region_proof: Some(vec![0; 32]),
                 data: vec![0; 32],
+                signature: vec![0; 64],
+                region_proof: Some(vec![]),
                 enclave_type: TeeType::SGX,
             }],
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -330,9 +330,9 @@ impl TeeExecutor for SimulatorController {
         Ok(vec![0; 32])
     }
 
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Return a dummy region for simulator
-        Ok(vec![Region {
+        Ok(vec![RegionInfo {
             id: "simulator".to_string(),
             worker_ids: vec!["local-worker".to_string()],
             max_tasks: 10,
@@ -345,9 +345,9 @@ impl TeeExecutor for SimulatorController {
             enclave_id: b"simulator".to_vec(),
             measurement: vec![0; 32],
             timestamp: chrono::Utc::now().timestamp() as u64,
-            data: vec![],
-            signature: vec![],
-            region_proof: None,
+            data: vec![0; 32],
+            signature: vec![0; 64],
+            region_proof: Some(vec![]),
             enclave_type: TeeType::SGX,
         }])
     }

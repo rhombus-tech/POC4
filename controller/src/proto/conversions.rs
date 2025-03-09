@@ -68,7 +68,7 @@ pub fn to_proto_attestation(interface: &InterfaceAttestation) -> ProtoAttestatio
     }
 }
 
-pub fn to_proto_region(interface: &Region) -> teeservice::Region {
+pub fn to_proto_region(interface: &RegionInfo) -> teeservice::Region {
     teeservice::Region {
         id: interface.id.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -78,7 +78,7 @@ pub fn to_proto_region(interface: &Region) -> teeservice::Region {
     }
 }
 
-use tee_interface::{ExecutionParams, TeeAttestation, Region};
+use tee_interface::{ExecutionParams, TeeAttestation, RegionInfo};
 use crate::proto::teeservice;
 
 impl From<ExecutionParams> for teeservice::ExecutionRequest {
@@ -125,8 +125,8 @@ impl From<TeeAttestation> for teeservice::TeeAttestation {
     }
 }
 
-impl From<Region> for teeservice::Region {
-    fn from(region: Region) -> Self {
+impl From<RegionInfo> for teeservice::Region {
+    fn from(region: RegionInfo) -> Self {
         Self {
             id: region.id,
             created_at: chrono::Utc::now().to_rfc3339(),

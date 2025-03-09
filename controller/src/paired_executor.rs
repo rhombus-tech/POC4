@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use log::{info, warn, error};
-use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region};
+use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region, RegionInfo};
 use async_trait::async_trait;
 use chrono::Utc;
 
@@ -111,7 +111,7 @@ impl TeeExecutor for TeeExecutorPair {
         Ok(result)
     }
     
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Get regions from both TEEs
         let primary_executor = self.primary.read().await;
         let primary_regions = (*primary_executor).get_regions().await?;
