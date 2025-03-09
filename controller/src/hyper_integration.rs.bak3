@@ -1493,12 +1493,6 @@ impl TeeExecutor for HyperTeeController {
     }
 }
 
-impl HyperTeeController {
-    // Getter for worker_id
-    pub fn get_worker_id(&self) -> &str {
-        &self.worker_id
-    }
-
     // Handle potential state conflicts between TEE pairs
     async fn resolve_state_conflict(
         &self,

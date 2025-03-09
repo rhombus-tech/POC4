@@ -3,7 +3,7 @@ use tokio::sync::RwLock;
 use log::{info, warn, error};
 use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region};
 use async_trait::async_trait;
-use chrono::{Utc, Duration};
+use chrono::Utc;
 
 /// TeeExecutorPair combines two TeeExecutor instances
 /// for redundant execution and cross-checking results

@@ -31,6 +31,8 @@ pub struct ExecutionParams {
     pub detailed_proof: bool,
     /// Function to call in the WASM module
     pub function_call: String,
+    /// Target contract ID
+    pub id_to: String,
 }
 
 impl Default for ExecutionParams {
@@ -39,6 +41,7 @@ impl Default for ExecutionParams {
             expected_hash: None,
             detailed_proof: false,
             function_call: "execute".to_string(),
+            id_to: String::new(),
         }
     }
 }
@@ -207,6 +210,7 @@ mod tests {
                 expected_hash: Some([0; 32]),
                 detailed_proof: true,
                 function_call: "test".to_string(),
+                id_to: "test".to_string(),
             },
         };
 
@@ -218,6 +222,7 @@ mod tests {
         assert_eq!(deserialized.params.expected_hash, payload.params.expected_hash);
         assert_eq!(deserialized.params.detailed_proof, payload.params.detailed_proof);
         assert_eq!(deserialized.params.function_call, payload.params.function_call);
+        assert_eq!(deserialized.params.id_to, payload.params.id_to);
     }
 
     #[test]

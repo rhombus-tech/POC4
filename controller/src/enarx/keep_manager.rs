@@ -1,11 +1,9 @@
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::Command;
 use std::io::Write;
 use log::{debug, info, error};
-use tokio::sync::RwLock;
 use crate::enarx::error::EnarxError;
 use tee_interface::TeeError;
-use std::sync::Arc;
 use std::env;
 
 /// Configuration for the Enarx Keep Manager

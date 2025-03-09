@@ -1,4 +1,4 @@
-use log::{debug, info, warn};
+use log::{debug, info};
 use tee_interface::TeeError;
 
 /// Helper struct for handling input parameters to contracts
