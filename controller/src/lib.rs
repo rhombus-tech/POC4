@@ -5,6 +5,8 @@ pub mod enarx;
 pub mod paired_executor;
 pub mod hyper_integration;
 pub mod coordinator_client;
+pub mod tee_peer;
+pub mod tee_peer_client;
 
 pub use simulator::SimulatorController;
 pub use enarx::EnarxController;
@@ -13,3 +15,5 @@ pub use hyper_integration::HyperTeeController;
 pub use server::TeeServer;
 pub use proto::teeservice::tee_execution_server::TeeExecutionServer;
 pub use coordinator_client::CoordinatorClient;
+pub use tee_peer::TeePeerService;
+pub use tee_peer_client::TeeServiceClient;

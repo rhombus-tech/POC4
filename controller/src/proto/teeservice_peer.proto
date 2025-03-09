@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package teeservice;
+
+// Service for direct TEE-to-TEE communication in a mesh network
+service TeeService {
+  // Execute a contract on a peer TEE
+  rpc Execute(ExecutionRequest) returns (ExecutionResponse);
+  
+  // Discover other TEEs in the same region
+  rpc Discover(DiscoveryRequest) returns (DiscoveryResponse);
+  
+  // Send heartbeat to maintain peer connections
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// Information about a TEE peer
+message PeerInfo {
+  string id = 1;
+  string address = 2;
+  string region_id = 3;
+  string role = 4; // "primary", "secondary", or "unknown"
+}
+
+// Request to discover other TEEs in a region
+message DiscoveryRequest {
+  string region_id = 1;
+  PeerInfo peer_info = 2; // Information about the requesting peer
+}
+
+// Response containing discovered peers
+message DiscoveryResponse {
+  repeated PeerInfo peers = 1;
+}
+
+// Request to send heartbeat to a peer
+message HeartbeatRequest {
+  string tee_id = 1;
+  uint64 timestamp = 2;
+}
+
+// Response to a heartbeat request
+message HeartbeatResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 timestamp = 3;
+}
+
+// Attestation information for a peer
+message PeerTeeAttestation {
+  bytes enclave_id = 1;
+  bytes measurement = 2;
+  string timestamp = 3;
+  bytes signature = 4;
+  string region_id = 5;
+  string enclave_type = 6;
+}
+
+// Response to an execution request
+message ExecutionResponse {
+  bytes result = 1;
+  bytes state_hash = 2;
+  uint64 execution_time = 3;
+  uint64 memory_used = 4;
+  uint64 syscall_count = 5;
+  repeated PeerTeeAttestation attestations = 6;
+  uint64 timestamp = 7;
+  string operation_status = 8;
+  string operation_id = 9;
+  repeated string pending_operations = 10;
+}
