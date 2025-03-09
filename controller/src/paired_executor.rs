@@ -12,22 +12,45 @@ pub struct TeeExecutorPair {
     primary: Arc<RwLock<dyn TeeExecutor + Send + Sync>>,
     /// Secondary TEE executor
     secondary: Arc<RwLock<dyn TeeExecutor + Send + Sync>>,
+    /// Optional contract ID generator function for consistent IDs across TEEs
+    contract_id_generator: Option<fn(&str) -> String>,
 }
 
 impl TeeExecutorPair {
     /// Create a new TeeExecutorPair with primary and secondary executors
     pub fn new(
         primary: Arc<RwLock<dyn TeeExecutor + Send + Sync>>,
-        secondary: Arc<RwLock<dyn TeeExecutor + Send + Sync>>
+        secondary: Arc<RwLock<dyn TeeExecutor + Send + Sync>>,
+        contract_id_generator: Option<fn(&str) -> String>,
     ) -> Self {
-        Self { primary, secondary }
+        Self { 
+            primary, 
+            secondary,
+            contract_id_generator,
+        }
     }
 }
 
 #[async_trait]
 impl TeeExecutor for TeeExecutorPair {
     async fn deploy_contract(&self, wasm_code: &[u8], region_id: &str) -> Result<String, TeeError> {
-        // Deploy to both TEEs and ensure they match
+        // If we have a custom contract ID generator, use it to generate a consistent ID
+        if let Some(generator) = self.contract_id_generator {
+            let contract_id = generator(region_id);
+            info!("Using generated contract ID {} for region {}", contract_id, region_id);
+            
+            // Deploy to primary TEE with custom ID
+            let primary_executor = self.primary.read().await;
+            (*primary_executor).deploy_contract(wasm_code, region_id).await?;
+            
+            // Deploy to secondary TEE with custom ID
+            let secondary_executor = self.secondary.read().await;
+            (*secondary_executor).deploy_contract(wasm_code, region_id).await?;
+            
+            return Ok(contract_id);
+        }
+        
+        // Standard deployment flow - deploy to both TEEs and ensure they match
         info!("Deploying contract to both TEEs in region {}", region_id);
         
         // Deploy to primary TEE

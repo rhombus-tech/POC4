@@ -70,7 +70,7 @@ async fn main() -> Result<(), std::io::Error> {
     let sev = Arc::new(RwLock::new(sev_controller));
     
     // Create the paired executor
-    let paired_executor = TeeExecutorPair::new(sgx, sev);
+    let paired_executor = TeeExecutorPair::new(sgx, sev, None);
     let executor = Arc::new(paired_executor);
     
     // Create the TEE server
