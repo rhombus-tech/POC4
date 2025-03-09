@@ -3,41 +3,82 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region};
+use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region, TeeType};
 use crate::enarx::keep_manager::{KeepManager, KeepManagerConfig};
 use crate::enarx::param_handler::ParamHandler;
 use crate::enarx::error::EnarxError;
 use chrono;
 use hex;
 use sha2::{Sha256, Digest};
+use crate::simulator::SimulatorController;
+use futures::TryFutureExt;
 
 /// Controller for Enarx TEE
 pub struct EnarxController {
-    /// Keep Manager for handling Enarx keeps
-    keep_manager: Option<Arc<KeepManager>>,
     /// Config directory for storing contracts
-    config_dir: PathBuf,
-    /// Current TEE type (SGX or SEV)
-    tee_type: String,
+    config_dir: String,
+    /// Enarx path
+    enarx_path: Option<String>,
+    /// Keep Manager for handling Enarx keeps
+    keep_manager: Option<KeepManager>,
     /// Simulation mode
     simulation: bool,
+    /// Simulator for simulation mode
+    simulator: Option<SimulatorController>,
     /// Map of contract IDs to filenames
     contracts: Arc<RwLock<std::collections::HashMap<String, PathBuf>>>,
 }
 
 impl EnarxController {
     /// Create a new Enarx controller
-    pub fn new(tee_type: String, config_dir: PathBuf, simulate: bool) -> Self {
-        info!("Creating EnarxController for TEE type: {}, config_dir: {:?}, simulate: {}", 
-              tee_type, config_dir, simulate);
+    pub async fn new(tee_type: TeeType, config_dir: &str, simulation: bool) -> Result<Self, TeeError> {
+        info!("Creating EnarxController for TEE type: {:?}, config_dir: {:?}, simulate: {}", tee_type, config_dir, simulation);
         
-        Self {
-            keep_manager: None,
-            config_dir,
-            tee_type,
-            simulation: simulate,
-            contracts: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        }
+        let controller = if simulation {
+            info!("Initializing EnarxController in simulation mode");
+            let simulator = Some(SimulatorController::new().await);
+            Self {
+                config_dir: config_dir.to_string(),
+                enarx_path: None,
+                keep_manager: None,
+                simulation,
+                simulator,
+                contracts: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            }
+        } else {
+            // Original code for non-simulation mode
+            let enarx_path = std::env::var("ENARX_PATH").ok();
+            
+            // If enarx_path is not set, try to find enarx in PATH
+            let enarx_path = match enarx_path {
+                Some(path) => Some(path),
+                None => {
+                    if which::which("enarx").is_ok() {
+                        Some("enarx".to_string())
+                    } else {
+                        return Err(TeeError::ExecutionError("Enarx path not provided and not found in PATH".to_string()));
+                    }
+                }
+            };
+            
+            let config = KeepManagerConfig { 
+                enarx_path: enarx_path.clone().unwrap(), 
+                max_keeps: 10,
+                warm_keeps: 2,
+            };
+            let keep_manager = Some(KeepManager::new(config));
+            
+            Self {
+                config_dir: config_dir.to_string(),
+                enarx_path,
+                keep_manager,
+                simulation,
+                simulator: None,
+                contracts: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            }
+        };
+        
+        Ok(controller)
     }
     
     /// Initialize the Enarx controller
@@ -50,19 +91,15 @@ impl EnarxController {
         info!("Initializing EnarxController with real Enarx Keep Manager");
         
         // Ensure the config directory exists
-        if !self.config_dir.exists() {
+        if !PathBuf::from(&self.config_dir).exists() {
             fs::create_dir_all(&self.config_dir)
                 .map_err(|e| EnarxError::Other(format!("Failed to create config directory: {}", e)))?;
         }
         
         // Initialize keep manager
-        let config = KeepManagerConfig::default();
-        let keep_manager = Arc::new(KeepManager::new(config));
-        
-        // Initialize the keep manager
-        keep_manager.initialize().await?;
-        
-        self.keep_manager = Some(keep_manager);
+        if let Some(keep_manager) = &mut self.keep_manager {
+            keep_manager.initialize().await?;
+        }
         
         Ok(())
     }
@@ -70,7 +107,7 @@ impl EnarxController {
     /// Helper method to save contract to disk
     async fn save_contract(&self, contract_id: &str, wasm_bytes: &[u8]) -> Result<PathBuf, EnarxError> {
         // Create a directory for the contract if it doesn't exist
-        let contract_dir = self.config_dir.join(contract_id);
+        let contract_dir = PathBuf::from(&self.config_dir).join(contract_id);
         if !contract_dir.exists() {
             fs::create_dir_all(&contract_dir)
                 .map_err(|e| EnarxError::DeploymentError(format!("Failed to create contract directory: {}", e)))?;
@@ -107,7 +144,7 @@ impl EnarxController {
             data: vec![],
             signature: vec![0; 64],
             region_proof: None,
-            enclave_type: tee_interface::TeeType::SGX,
+            enclave_type: TeeType::SGX,
         };
         
         Ok(vec![attestation])
@@ -117,22 +154,46 @@ impl EnarxController {
 #[async_trait::async_trait]
 impl TeeExecutor for EnarxController {
     async fn deploy_contract(&self, wasm_code: &[u8], region_id: &str) -> Result<String, TeeError> {
-        debug!("Deploying contract with {} bytes to region {}", wasm_code.len(), region_id);
-        
-        // Generate a contract ID (in real implementation, this would be a hash of the WASM)
+        // Generate a unique contract ID
         let mut hasher = Sha256::new();
         hasher.update(wasm_code);
         let contract_id = hex::encode(hasher.finalize());
         
-        let wasm_path = self.save_contract(&contract_id, wasm_code).await?;
-        
-        // Store contract ID mapping
-        let mut contracts = self.contracts.write().await;
-        contracts.insert(contract_id.clone(), wasm_path);
-        
         info!("Deployed contract {}", contract_id);
         
-        // Return contract ID
+        // Store the contract for simulation mode if needed
+        if self.simulation {
+            if let Some(simulator) = &self.simulator {
+                // Deploy the contract to the simulator
+                simulator.deploy_contract(wasm_code, region_id).await?;
+                
+                // Write the WASM code to a file for later use
+                let wasm_path = format!("{}/contract_{}.wasm", self.config_dir, contract_id);
+                tokio::fs::create_dir_all(&self.config_dir).await
+                    .map_err(|e| TeeError::Contract(format!("Failed to create config directory: {}", e)))?;
+                
+                tokio::fs::write(&wasm_path, wasm_code).await
+                    .map_err(|e| TeeError::Contract(format!("Failed to write WASM file: {}", e)))?;
+                
+                // Store the contract reference in our map
+                let mut contracts = self.contracts.write().await;
+                contracts.insert(contract_id.clone(), PathBuf::from(&wasm_path));
+            }
+        } else {
+            // Save the contract to a file
+            let wasm_path = format!("{}/contract_{}.wasm", self.config_dir, contract_id);
+            
+            tokio::fs::create_dir_all(&self.config_dir).await
+                .map_err(|e| TeeError::Contract(format!("Failed to create config directory: {}", e)))?;
+            
+            tokio::fs::write(&wasm_path, wasm_code).await
+                .map_err(|e| TeeError::Contract(format!("Failed to write WASM file: {}", e)))?;
+                
+            // Store the contract in the map
+            let mut contracts = self.contracts.write().await;
+            contracts.insert(contract_id.clone(), PathBuf::from(&wasm_path));
+        }
+        
         Ok(contract_id)
     }
     
@@ -154,9 +215,14 @@ impl TeeExecutor for EnarxController {
         let processed_params = param_handler.process_params(input)?;
         
         let result = if self.simulation {
-            // In simulation mode, just return the params as the result
-            debug!("Simulation mode: returning params as result");
-            processed_params.to_vec()
+            if let Some(simulator) = &self.simulator {
+                // In simulation mode, execute using the simulator
+                let execution_result = simulator.execute(payload).await
+                    .map_err(|e| TeeError::ExecutionError(format!("Simulation execution failed: {}", e)))?;
+                execution_result.result
+            } else {
+                return Err(TeeError::ExecutionError("Simulator not initialized".to_string()));
+            }
         } else {
             // Real execution using the keep manager
             if let Some(keep_manager) = &self.keep_manager {
@@ -170,7 +236,7 @@ impl TeeExecutor for EnarxController {
         let region_id = if let Some(region) = payload.params.id_to.split('/').next() {
             region.to_string()
         } else {
-            format!("{}-region", self.tee_type.to_lowercase())
+            format!("{}-region", "enarx".to_lowercase())
         };
         
         // Return the execution result
@@ -193,8 +259,8 @@ impl TeeExecutor for EnarxController {
     async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
         // Return a dummy region for now
         Ok(vec![Region {
-            id: format!("{}-region", self.tee_type.to_lowercase()),
-            worker_ids: vec![format!("{}-worker-1", self.tee_type.to_lowercase())],
+            id: format!("{}-region", "enarx".to_lowercase()),
+            worker_ids: vec![format!("{}-worker-1", "enarx".to_lowercase())],
             max_tasks: 10,
         }])
     }

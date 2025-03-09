@@ -13,6 +13,7 @@ use uuid::Uuid;
 use async_trait::async_trait;
 use chrono;
 use sha2::{Sha256, Digest};
+use hex;
 
 const DEFAULT_GAS: u64 = 1_000_000;
 
@@ -249,32 +250,31 @@ impl TeeExecutor for SimulatorController {
         let input = payload.input.clone();
         let function_call = payload.params.function_call.clone();
         
-        // For simplification in our mock implementation, we'll directly process the command
-        // without going through the Simulator.execute path which has mutex issues
+        // For simplification in our mock implementation, we'll handle specific functions
         let result = if function_call == "add" {
-            // Handle the add function directly
-            let params_str = String::from_utf8_lossy(&input);
-            let parts: Vec<&str> = params_str.split(',').collect();
-            
-            if parts.len() < 2 {
+            // Handle the add function - expects two u32 values in byte representation
+            if input.len() >= 8 {
+                let num1 = u32::from_le_bytes([
+                    input[0], 
+                    input[1], 
+                    input[2], 
+                    input[3]
+                ]);
+                let num2 = u32::from_le_bytes([
+                    input[4], 
+                    input[5], 
+                    input[6], 
+                    input[7]
+                ]);
+                
+                let sum = num1 + num2;
+                println!("Successfully calculated {} + {} = {}", num1, num2, sum);
+                sum.to_le_bytes().to_vec()
+            } else {
                 return Err(TeeError::Contract(format!(
-                    "Invalid parameters for add method. Expected 2 parameters, got {}",
-                    parts.len()
+                    "Invalid parameters for add method. Expected 8 bytes, got {}",
+                    input.len()
                 )));
-            }
-            
-            match (parts[0].trim().parse::<i32>(), parts[1].trim().parse::<i32>()) {
-                (Ok(a), Ok(b)) => {
-                    let result = a + b;
-                    println!("Successfully calculated {} + {} = {}", a, b, result);
-                    result.to_le_bytes().to_vec()
-                },
-                _ => {
-                    return Err(TeeError::Contract(format!(
-                        "Failed to parse parameters for add method: {:?}",
-                        parts
-                    )));
-                }
             }
         } else {
             // Unsupported method
@@ -307,8 +307,10 @@ impl TeeExecutor for SimulatorController {
     }
 
     async fn deploy_contract(&self, wasm_code: &[u8], _region_id: &str) -> Result<String, TeeError> {
-        // Generate contract ID
-        let contract_id = Uuid::new_v4().to_string();
+        // Generate contract ID using hash for consistency with EnarxController
+        let mut hasher = Sha256::new();
+        hasher.update(wasm_code);
+        let contract_id = hex::encode(hasher.finalize());
 
         // Store contract code
         {
@@ -320,7 +322,6 @@ impl TeeExecutor for SimulatorController {
         println!("Deployed contract with ID: {}", contract_id);
         println!("Contract code size: {} bytes", wasm_code.len());
 
-        // Return the contract ID
         Ok(contract_id)
     }
 

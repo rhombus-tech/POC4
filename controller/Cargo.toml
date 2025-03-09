@@ -26,6 +26,7 @@ wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["std", "
 
 # CLI
 clap = { workspace = true }
+which = "4.0"
 
 # Randomization
 rand = "0.8"

@@ -2761,6 +2761,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid 1.13.1",
  "wasmlanche",
+ "which",
 ]
 
 [[package]]
