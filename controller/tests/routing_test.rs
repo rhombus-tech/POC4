@@ -10,11 +10,7 @@ use tee_interface::{ExecutionPayload, TeeExecutor, TeeType, RegionInfo};
 #[tokio::test]
 async fn test_metrics_based_routing() {
     // Create a new metrics store
-    let metrics_store = Arc::new(MetricsStore::new(
-        "test-worker".to_string(),
-        "us-west".to_string(),
-        "SGX".to_string()
-    ));
+    let metrics_store = Arc::new(MetricsStore::new());
     
     // Record some metrics to simulate performance data
     metrics_store.record_worker_metric("worker-1", "us-west", 50, true).await;

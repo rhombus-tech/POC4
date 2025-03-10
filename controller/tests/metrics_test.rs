@@ -5,22 +5,52 @@ use std::sync::Arc;
 #[tokio::test]
 async fn test_metrics_collection() {
     // Create a metrics store
-    let store = MetricsStore::new(
-        "worker-1".to_string(),
-        "region-1".to_string(),
-        "SGX".to_string()
-    );
+    let store = MetricsStore::new();
     
     // Record a few successful executions
-    store.record_execution_success(50).await.unwrap();
-    store.record_execution_success(100).await.unwrap();
-    store.record_execution_success(75).await.unwrap();
+    store.record_execution(
+        "region-1", 
+        "SGX", 
+        "worker-1", 
+        50.0, 
+        true, 
+        1000, 
+        500
+    ).await.unwrap();
+    
+    store.record_execution(
+        "region-1", 
+        "SGX", 
+        "worker-1", 
+        100.0, 
+        true, 
+        1000, 
+        500
+    ).await.unwrap();
+    
+    store.record_execution(
+        "region-1", 
+        "SGX", 
+        "worker-1", 
+        75.0, 
+        true, 
+        1000, 
+        500
+    ).await.unwrap();
     
     // Record a failure
-    store.record_execution_failure().await.unwrap();
+    store.record_execution(
+        "region-1", 
+        "SGX", 
+        "worker-1", 
+        0.0, 
+        false, 
+        1000, 
+        0
+    ).await.unwrap();
     
     // Get metrics and verify
-    let metrics = store.get_current_worker_metrics().await;
+    let metrics = store.get_worker_metrics("worker-1").await.unwrap();
     assert_eq!(metrics.total_executions, 4);
     assert_eq!(metrics.successful_executions, 3);
     assert_eq!(metrics.failed_executions, 1);
@@ -30,22 +60,18 @@ async fn test_metrics_collection() {
 #[tokio::test]
 async fn test_routing_strategy() {
     // Create a metrics store
-    let store = Arc::new(MetricsStore::new(
-        "worker-1".to_string(),
-        "region-1".to_string(),
-        "SGX".to_string()
-    ));
+    let store = Arc::new(MetricsStore::new());
     
     // Record metrics for multiple workers
-    store.record_worker_metric("fast-worker", "region-1", 50, true).await.unwrap();
-    store.record_worker_metric("fast-worker", "region-1", 60, true).await.unwrap();
+    store.record_execution("region-1", "SGX", "fast-worker", 50.0, true, 1000, 500).await.unwrap();
+    store.record_execution("region-1", "SGX", "fast-worker", 60.0, true, 1000, 500).await.unwrap();
     
-    store.record_worker_metric("slow-worker", "region-1", 150, true).await.unwrap();
-    store.record_worker_metric("slow-worker", "region-1", 180, true).await.unwrap();
+    store.record_execution("region-1", "SGX", "slow-worker", 150.0, true, 1000, 500).await.unwrap();
+    store.record_execution("region-1", "SGX", "slow-worker", 180.0, true, 1000, 500).await.unwrap();
     
-    store.record_worker_metric("unreliable-worker", "region-1", 40, true).await.unwrap();
-    store.record_worker_metric("unreliable-worker", "region-1", 0, false).await.unwrap();
-    store.record_worker_metric("unreliable-worker", "region-1", 0, false).await.unwrap();
+    store.record_execution("region-1", "SGX", "unreliable-worker", 40.0, true, 1000, 500).await.unwrap();
+    store.record_execution("region-1", "SGX", "unreliable-worker", 0.0, false, 1000, 0).await.unwrap();
+    store.record_execution("region-1", "SGX", "unreliable-worker", 0.0, false, 1000, 0).await.unwrap();
     
     // Create routing strategy
     let strategy = RoutingStrategy::new(Arc::clone(&store));
@@ -79,22 +105,18 @@ async fn test_routing_strategy() {
 #[tokio::test]
 async fn test_region_selection() {
     // Create a metrics store
-    let store = Arc::new(MetricsStore::new(
-        "worker-1".to_string(),
-        "region-1".to_string(),
-        "SGX".to_string()
-    ));
+    let store = Arc::new(MetricsStore::new());
     
     // Record metrics for multiple regions via worker metrics
-    store.record_worker_metric("fast-worker", "fast-region", 50, true).await.unwrap();
-    store.record_worker_metric("fast-worker", "fast-region", 60, true).await.unwrap();
+    store.record_execution("fast-region", "SGX", "fast-worker", 50.0, true, 1000, 500).await.unwrap();
+    store.record_execution("fast-region", "SGX", "fast-worker", 60.0, true, 1000, 500).await.unwrap();
     
-    store.record_worker_metric("slow-worker", "slow-region", 150, true).await.unwrap();
-    store.record_worker_metric("slow-worker", "slow-region", 180, true).await.unwrap();
+    store.record_execution("slow-region", "SGX", "slow-worker", 150.0, true, 1000, 500).await.unwrap();
+    store.record_execution("slow-region", "SGX", "slow-worker", 180.0, true, 1000, 500).await.unwrap();
     
-    store.record_worker_metric("unreliable-worker", "unreliable-region", 40, true).await.unwrap();
-    store.record_worker_metric("unreliable-worker", "unreliable-region", 0, false).await.unwrap();
-    store.record_worker_metric("unreliable-worker", "unreliable-region", 0, false).await.unwrap();
+    store.record_execution("unreliable-region", "SGX", "unreliable-worker", 40.0, true, 1000, 500).await.unwrap();
+    store.record_execution("unreliable-region", "SGX", "unreliable-worker", 0.0, false, 1000, 0).await.unwrap();
+    store.record_execution("unreliable-region", "SGX", "unreliable-worker", 0.0, false, 1000, 0).await.unwrap();
     
     // Create routing strategy
     let strategy = RoutingStrategy::new(Arc::clone(&store));

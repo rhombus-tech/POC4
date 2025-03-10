@@ -20,6 +20,8 @@ parking_lot = "0.12.3"
 reqwest = { version = "0.11", features = ["json"] }
 axum = "0.6"
 tower = "0.4"
+sha2 = "0.10.7"
+digest = "0.10.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche", features = ["std", "simulator", "bindings"] }

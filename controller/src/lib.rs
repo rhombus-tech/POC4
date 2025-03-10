@@ -8,6 +8,7 @@ pub mod coordinator_client;
 pub mod tee_peer;
 pub mod tee_peer_client;
 pub mod metrics;
+pub mod mesh;
 
 pub use simulator::SimulatorController;
 pub use enarx::EnarxController;
@@ -19,3 +20,4 @@ pub use coordinator_client::CoordinatorClient;
 pub use tee_peer::TeePeerService;
 pub use tee_peer_client::TeeServiceClient;
 pub use metrics::{MetricsStore, RoutingStrategy, TeePerformanceMetrics};
+pub use mesh::{MeshCoordinator, MeshConfig};

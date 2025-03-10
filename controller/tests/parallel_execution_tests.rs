@@ -40,17 +40,14 @@ async fn setup_tee_pair() -> TeeExecutorPair {
     let primary = Arc::new(RwLock::new(primary));
     let secondary = Arc::new(RwLock::new(secondary));
     
-    // Override the contract_id_generator function
-    let override_contract_id_generator = |region_id: &str| -> String {
-        format!("synced_contract_{}", region_id)
-    };
-    
     // Create the TEE executor pair
     TeeExecutorPair::new(
         primary,
         secondary,
-        Some(override_contract_id_generator),
-    )
+        None,
+    ).with_contract_id_generator(|region_id| {
+        format!("synced_contract_{}", region_id)
+    })
 }
 
 /// Helper function to measure execution time

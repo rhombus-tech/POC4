@@ -2739,6 +2739,7 @@ dependencies = [
  "borsh 1.5.5",
  "chrono",
  "clap",
+ "digest",
  "env_logger",
  "futures",
  "futures-util",

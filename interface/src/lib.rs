@@ -111,7 +111,7 @@ pub mod types {
         pub max_tasks: u32,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
     pub enum TeeType {
         SGX,
         SEV,

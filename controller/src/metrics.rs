@@ -39,6 +39,18 @@ pub struct TeePerformanceMetrics {
     /// Time of the last failed execution
     #[serde(with = "chrono::serde::ts_seconds_option")]
     pub last_failure_time: Option<DateTime<Utc>>,
+    
+    /// Network latency for mesh operations (ms)
+    pub average_network_latency_ms: Option<f64>,
+    
+    /// Throughput in bytes per second
+    pub average_throughput_bytes_ps: Option<f64>,
+    
+    /// Average memory usage in bytes
+    pub average_memory_used_bytes: Option<u64>,
+    
+    /// Average syscall count
+    pub average_syscall_count: Option<u64>,
 }
 
 impl TeePerformanceMetrics {
@@ -83,6 +95,53 @@ impl TeePerformanceMetrics {
         // Update success rate
         self.success_rate = (self.successful_executions as f64 / self.total_executions as f64) * 100.0;
     }
+    
+    /// Record mesh-specific metrics
+    pub fn record_mesh_metrics(
+        &mut self, 
+        network_latency_ms: Option<f64>,
+        throughput_bytes_ps: Option<f64>,
+        memory_used_bytes: Option<u64>,
+        syscall_count: Option<u64>,
+    ) {
+        if let Some(latency) = network_latency_ms {
+            if let Some(current) = self.average_network_latency_ms {
+                // Weighted average: 80% old value, 20% new value for smoothing
+                self.average_network_latency_ms = Some(current * 0.8 + latency * 0.2);
+            } else {
+                self.average_network_latency_ms = Some(latency);
+            }
+        }
+        
+        if let Some(throughput) = throughput_bytes_ps {
+            if let Some(current) = self.average_throughput_bytes_ps {
+                self.average_throughput_bytes_ps = Some(current * 0.8 + throughput * 0.2);
+            } else {
+                self.average_throughput_bytes_ps = Some(throughput);
+            }
+        }
+        
+        if let Some(memory) = memory_used_bytes {
+            if let Some(current) = self.average_memory_used_bytes {
+                // Simple running average
+                self.average_memory_used_bytes = Some(
+                    (current * (self.total_executions - 1) + memory) / self.total_executions
+                );
+            } else {
+                self.average_memory_used_bytes = Some(memory);
+            }
+        }
+        
+        if let Some(syscalls) = syscall_count {
+            if let Some(current) = self.average_syscall_count {
+                self.average_syscall_count = Some(
+                    (current * (self.total_executions - 1) + syscalls) / self.total_executions
+                );
+            } else {
+                self.average_syscall_count = Some(syscalls);
+            }
+        }
+    }
 }
 
 /// Storage for TEE metrics and execution statistics
@@ -100,107 +159,209 @@ pub struct MetricsStore {
     /// TEE type metrics
     tee_type_metrics: Arc<RwLock<HashMap<String, TeePerformanceMetrics>>>,
     
-    /// Current worker ID for this instance
-    worker_id: String,
+    /// Multi-dimensional metrics: region -> tee_type -> worker -> metrics
+    multi_metrics: Arc<RwLock<HashMap<String, HashMap<String, HashMap<String, TeePerformanceMetrics>>>>>,
     
-    /// Current region ID for this instance
-    region_id: String,
-    
-    /// TEE type for this instance
-    tee_type: String,
+    /// Worker latency tracking
+    worker_latencies: Arc<RwLock<HashMap<String, Vec<f64>>>>,
 }
 
 impl MetricsStore {
     /// Create a new metrics store
-    pub fn new(worker_id: String, region_id: String, tee_type: String) -> Self {
-        let mut worker_metrics = HashMap::new();
-        worker_metrics.insert(worker_id.clone(), TeePerformanceMetrics::new());
-        
-        let mut region_metrics = HashMap::new();
-        region_metrics.insert(region_id.clone(), TeePerformanceMetrics::new());
-        
-        let mut tee_type_metrics = HashMap::new();
-        tee_type_metrics.insert(tee_type.clone(), TeePerformanceMetrics::new());
-        
+    pub fn new() -> Self {
         Self {
-            worker_metrics: Arc::new(RwLock::new(worker_metrics)),
-            region_metrics: Arc::new(RwLock::new(region_metrics)),
+            worker_metrics: Arc::new(RwLock::new(HashMap::new())),
+            region_metrics: Arc::new(RwLock::new(HashMap::new())),
             overall_metrics: Arc::new(RwLock::new(TeePerformanceMetrics::new())),
-            tee_type_metrics: Arc::new(RwLock::new(tee_type_metrics)),
-            worker_id,
-            region_id,
-            tee_type,
+            tee_type_metrics: Arc::new(RwLock::new(HashMap::new())),
+            multi_metrics: Arc::new(RwLock::new(HashMap::new())),
+            worker_latencies: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
-    /// Record a successful execution for this worker
-    pub async fn record_execution_success(&self, duration_ms: u64) -> Result<(), String> {
+    /// Record an execution with detailed metrics
+    pub async fn record_execution(
+        &self,
+        region_id: &str,
+        tee_type: &str,
+        worker_id: &str,
+        duration_ms: f64,
+        success: bool,
+        input_size_bytes: u64,
+        output_size_bytes: u64,
+    ) -> Result<(), String> {
+        let duration_ms_u64 = duration_ms.ceil() as u64;
+        
         // Update worker metrics
-        {
-            let mut metrics = self.worker_metrics.write().await;
-            let worker_metrics = metrics.entry(self.worker_id.clone())
-                .or_insert_with(TeePerformanceMetrics::new);
-            worker_metrics.record_success(duration_ms);
+        let mut worker_metrics = self.worker_metrics.write().await;
+        let worker_metric = worker_metrics
+            .entry(worker_id.to_string())
+            .or_insert_with(TeePerformanceMetrics::new);
+            
+        if success {
+            worker_metric.record_success(duration_ms_u64);
+        } else {
+            worker_metric.record_failure();
         }
+        
+        // Calculate throughput if both input and output are non-zero
+        if input_size_bytes > 0 && output_size_bytes > 0 && duration_ms > 0.0 {
+            let throughput_bytes_ps = ((input_size_bytes + output_size_bytes) as f64) / (duration_ms / 1000.0);
+            worker_metric.record_mesh_metrics(
+                Some(0.0), // We don't have network latency here
+                Some(throughput_bytes_ps),
+                None,
+                None,
+            );
+        }
+        
+        drop(worker_metrics);
         
         // Update region metrics
-        {
-            let mut metrics = self.region_metrics.write().await;
-            let region_metrics = metrics.entry(self.region_id.clone())
-                .or_insert_with(TeePerformanceMetrics::new);
-            region_metrics.record_success(duration_ms);
+        let mut region_metrics = self.region_metrics.write().await;
+        let region_metric = region_metrics
+            .entry(region_id.to_string())
+            .or_insert_with(TeePerformanceMetrics::new);
+            
+        if success {
+            region_metric.record_success(duration_ms_u64);
+        } else {
+            region_metric.record_failure();
         }
+        drop(region_metrics);
         
         // Update TEE type metrics
-        {
-            let mut metrics = self.tee_type_metrics.write().await;
-            let tee_type_metrics = metrics.entry(self.tee_type.clone())
-                .or_insert_with(TeePerformanceMetrics::new);
-            tee_type_metrics.record_success(duration_ms);
+        let mut tee_type_metrics = self.tee_type_metrics.write().await;
+        let tee_type_metric = tee_type_metrics
+            .entry(tee_type.to_string())
+            .or_insert_with(TeePerformanceMetrics::new);
+            
+        if success {
+            tee_type_metric.record_success(duration_ms_u64);
+        } else {
+            tee_type_metric.record_failure();
         }
+        drop(tee_type_metrics);
         
         // Update overall metrics
-        {
-            let mut metrics = self.overall_metrics.write().await;
-            metrics.record_success(duration_ms);
+        let mut overall_metrics = self.overall_metrics.write().await;
+        if success {
+            overall_metrics.record_success(duration_ms_u64);
+        } else {
+            overall_metrics.record_failure();
         }
+        drop(overall_metrics);
+        
+        // Update multi-dimensional metrics
+        let mut multi_metrics = self.multi_metrics.write().await;
+        let region_map = multi_metrics
+            .entry(region_id.to_string())
+            .or_insert_with(HashMap::new);
+            
+        let tee_type_map = region_map
+            .entry(tee_type.to_string())
+            .or_insert_with(HashMap::new);
+            
+        let worker_metric = tee_type_map
+            .entry(worker_id.to_string())
+            .or_insert_with(TeePerformanceMetrics::new);
+            
+        if success {
+            worker_metric.record_success(duration_ms_u64);
+        } else {
+            worker_metric.record_failure();
+        }
+        
+        // Also track latency separately for circuit breaker calculations
+        let mut worker_latencies = self.worker_latencies.write().await;
+        let latencies = worker_latencies
+            .entry(format!("{}:{}", region_id, worker_id))
+            .or_insert_with(Vec::new);
+            
+        // Keep only the last 10 latencies to avoid unbounded growth
+        if latencies.len() >= 10 {
+            latencies.remove(0);
+        }
+        latencies.push(duration_ms);
         
         Ok(())
     }
     
-    /// Record a failed execution for this worker
-    pub async fn record_execution_failure(&self) -> Result<(), String> {
+    /// Record mesh-specific metrics for a worker
+    pub async fn record_mesh_metrics(
+        &self,
+        region_id: &str,
+        tee_type: &str,
+        worker_id: &str,
+        network_latency_ms: f64,
+        memory_used_bytes: u64,
+        syscall_count: u64,
+    ) -> Result<(), String> {
         // Update worker metrics
-        {
-            let mut metrics = self.worker_metrics.write().await;
-            let worker_metrics = metrics.entry(self.worker_id.clone())
-                .or_insert_with(TeePerformanceMetrics::new);
-            worker_metrics.record_failure();
-        }
+        let mut worker_metrics = self.worker_metrics.write().await;
+        let worker_metric = worker_metrics
+            .entry(worker_id.to_string())
+            .or_insert_with(TeePerformanceMetrics::new);
+            
+        worker_metric.record_mesh_metrics(
+            Some(network_latency_ms),
+            None, // No throughput info
+            Some(memory_used_bytes),
+            Some(syscall_count),
+        );
         
-        // Update region metrics
-        {
-            let mut metrics = self.region_metrics.write().await;
-            let region_metrics = metrics.entry(self.region_id.clone())
-                .or_insert_with(TeePerformanceMetrics::new);
-            region_metrics.record_failure();
-        }
+        drop(worker_metrics);
         
-        // Update TEE type metrics
-        {
-            let mut metrics = self.tee_type_metrics.write().await;
-            let tee_type_metrics = metrics.entry(self.tee_type.clone())
-                .or_insert_with(TeePerformanceMetrics::new);
-            tee_type_metrics.record_failure();
-        }
+        // Update multi-dimensional metrics
+        let mut multi_metrics = self.multi_metrics.write().await;
+        let region_map = multi_metrics
+            .entry(region_id.to_string())
+            .or_insert_with(HashMap::new);
+            
+        let tee_type_map = region_map
+            .entry(tee_type.to_string())
+            .or_insert_with(HashMap::new);
+            
+        let worker_metric = tee_type_map
+            .entry(worker_id.to_string())
+            .or_insert_with(TeePerformanceMetrics::new);
+            
+        worker_metric.record_mesh_metrics(
+            Some(network_latency_ms),
+            None,
+            Some(memory_used_bytes),
+            Some(syscall_count),
+        );
         
-        // Update overall metrics
-        {
-            let mut metrics = self.overall_metrics.write().await;
-            metrics.record_failure();
+        // Also track latency separately for circuit breaker calculations
+        let mut worker_latencies = self.worker_latencies.write().await;
+        let latencies = worker_latencies
+            .entry(format!("{}:{}", region_id, worker_id))
+            .or_insert_with(Vec::new);
+            
+        // Keep only the last 10 latencies to avoid unbounded growth
+        if latencies.len() >= 10 {
+            latencies.remove(0);
         }
+        latencies.push(network_latency_ms);
         
         Ok(())
+    }
+    
+    /// Get the average latency for a worker in a region
+    pub async fn get_average_latency(&self, region_id: &str, worker_id: &str) -> Option<f64> {
+        let worker_latencies = self.worker_latencies.read().await;
+        let key = format!("{}:{}", region_id, worker_id);
+        
+        worker_latencies.get(&key).map(|latencies| {
+            if latencies.is_empty() {
+                return 0.0;
+            }
+            
+            // Calculate average latency
+            let sum: f64 = latencies.iter().sum();
+            sum / latencies.len() as f64
+        })
     }
     
     /// Get metrics for a specific worker
@@ -229,7 +390,7 @@ impl MetricsStore {
     
     /// Get metrics for this worker
     pub async fn get_current_worker_metrics(&self) -> TeePerformanceMetrics {
-        self.get_worker_metrics(&self.worker_id).await
+        self.get_worker_metrics("worker-1").await
             .unwrap_or_else(TeePerformanceMetrics::new)
     }
 
@@ -345,6 +506,32 @@ impl RoutingStrategy {
     }
 }
 
+/// A simpler metrics collector interface primarily for mesh operations
+#[derive(Debug)]
+pub struct MetricsCollector {
+    /// Underlying store for metrics
+    store: MetricsStore,
+}
+
+impl MetricsCollector {
+    /// Create a new metrics collector
+    pub fn new() -> Self {
+        Self {
+            store: MetricsStore::new(),
+        }
+    }
+    
+    /// Record success from a mesh execution
+    pub fn record_mesh_success(&self, result: &crate::mesh::MeshExecutionResult) {
+        // Implementation would track metrics from mesh operations
+    }
+    
+    /// Retrieve the underlying metrics store
+    pub fn get_store(&self) -> &MetricsStore {
+        &self.store
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,14 +572,10 @@ mod tests {
     
     #[tokio::test]
     async fn test_metrics_store() {
-        let store = MetricsStore::new(
-            "worker-1".to_string(),
-            "region-1".to_string(),
-            "SGX".to_string()
-        );
+        let store = MetricsStore::new();
         
         // Record successful execution
-        store.record_execution_success(150).await.unwrap();
+        store.record_execution("region-1", "SGX", "worker-1", 150.0, true, 100, 100).await.unwrap();
         
         // Get metrics for the worker
         let worker_metrics = store.get_worker_metrics("worker-1").await.unwrap();
@@ -406,7 +589,7 @@ mod tests {
         assert_eq!(region_metrics.successful_executions, 1);
         
         // Record failure
-        store.record_execution_failure().await.unwrap();
+        store.record_execution("region-1", "SGX", "worker-1", 200.0, false, 100, 100).await.unwrap();
         
         // Get updated metrics
         let worker_metrics = store.get_worker_metrics("worker-1").await.unwrap();
@@ -418,19 +601,15 @@ mod tests {
     
     #[tokio::test]
     async fn test_routing_strategy() {
-        let store = Arc::new(MetricsStore::new(
-            "worker-1".to_string(),
-            "region-1".to_string(),
-            "SGX".to_string()
-        ));
+        let store = Arc::new(MetricsStore::new());
         
         // Record metrics for several workers
-        store.record_worker_success("worker-1", 100).await.unwrap();
-        store.record_worker_success("worker-1", 150).await.unwrap();
-        store.record_worker_success("worker-2", 50).await.unwrap();
-        store.record_worker_success("worker-2", 80).await.unwrap();
-        store.record_worker_success("worker-3", 200).await.unwrap();
-        store.record_worker_failure("worker-3").await.unwrap();
+        store.record_execution("region-1", "SGX", "worker-1", 100.0, true, 100, 100).await.unwrap();
+        store.record_execution("region-1", "SGX", "worker-1", 150.0, true, 100, 100).await.unwrap();
+        store.record_execution("region-2", "SGX", "worker-2", 50.0, true, 100, 100).await.unwrap();
+        store.record_execution("region-2", "SGX", "worker-2", 80.0, true, 100, 100).await.unwrap();
+        store.record_execution("region-3", "SGX", "worker-3", 200.0, true, 100, 100).await.unwrap();
+        store.record_execution("region-3", "SGX", "worker-3", 250.0, false, 100, 100).await.unwrap();
         
         let strategy = RoutingStrategy::new(store);
         

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use async_trait::async_trait;
 use tee_interface::{TeeExecutor, ExecutionPayload, ExecutionResult, TeeError, ExecutionStats, TeeAttestation, TeeType, RegionInfo};
+use tee_interface::types::ExecutionParams;
 use crate::proto::teeservice::Region;
 use crate::simulator::Simulator;
 use wasmlanche::types::WasmlAddress;
@@ -14,12 +15,23 @@ use crate::coordinator_client::CoordinatorClient;
 use std::env;
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
+use log::{info, warn, error, debug};
+use crate::mesh::{MeshCoordinator, MeshConfig, MeshExecutionResult, PeerInfo, SyncResult, TeeType as MeshTeeType};
 
 // Define a constant for default gas limits
 const DEFAULT_GAS: u64 = 1_000_000;
 
 // Default coordinator URL
 const DEFAULT_COORDINATOR_URL: &str = "http://localhost:8080";
+
+// Default circuit breaker threshold (ms)
+const DEFAULT_CIRCUIT_BREAKER_THRESHOLD_MS: u64 = 100;
+
+// Default peer refresh interval (seconds)
+const DEFAULT_PEER_REFRESH_INTERVAL_SEC: u64 = 60;
+
+// Default max peers to track
+const DEFAULT_MAX_PEERS: usize = 10;
 
 // TEE execution modes
 #[derive(Clone, PartialEq)]
@@ -28,6 +40,10 @@ enum ExecutionMode {
     Direct,
     // Execution via coordinator on multiple TEE pairs
     Coordinated,
+    // Execution via direct mesh communication
+    Mesh,
+    // Automatic selection of mesh or coordinated based on routing
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +78,11 @@ pub struct HyperTeeController {
     routing_strategy: Option<Arc<crate::metrics::RoutingStrategy>>,
     region_id: String,
     tee_type: String,
+    
+    // Mesh network integration
+    mesh_coordinator: Option<Arc<MeshCoordinator>>,
+    mesh_enabled: bool,
+    circuit_breaker_threshold: Duration,
 }
 
 impl HyperTeeController {
@@ -91,32 +112,80 @@ impl HyperTeeController {
             None
         };
         
-        // Determine execution mode based on coordinator presence
-        let execution_mode = if coordinator.is_some() {
-            ExecutionMode::Coordinated
-        } else {
-            ExecutionMode::Direct
+        // Determine if mesh is enabled
+        let mesh_enabled = env::var("MESH_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse::<bool>()
+            .unwrap_or(false);
+            
+        // Get circuit breaker threshold
+        let circuit_breaker_threshold_ms = env::var("CIRCUIT_BREAKER_THRESHOLD_MS")
+            .unwrap_or_else(|_| DEFAULT_CIRCUIT_BREAKER_THRESHOLD_MS.to_string())
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_CIRCUIT_BREAKER_THRESHOLD_MS);
+            
+        // Get peer refresh interval
+        let peer_refresh_interval_sec = env::var("PEER_REFRESH_INTERVAL_SEC")
+            .unwrap_or_else(|_| DEFAULT_PEER_REFRESH_INTERVAL_SEC.to_string())
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_PEER_REFRESH_INTERVAL_SEC);
+            
+        // Get max peers
+        let max_peers = env::var("MAX_PEERS")
+            .unwrap_or_else(|_| DEFAULT_MAX_PEERS.to_string())
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_MAX_PEERS);
+            
+        // Get the execution mode from environment
+        let execution_mode_str = env::var("EXECUTION_MODE")
+            .unwrap_or_else(|_| "auto".to_string());
+            
+        let execution_mode = match execution_mode_str.to_lowercase().as_str() {
+            "direct" => ExecutionMode::Direct,
+            "coordinated" => ExecutionMode::Coordinated,
+            "mesh" => ExecutionMode::Mesh,
+            _ => ExecutionMode::Auto,
         };
         
         // Get region ID from environment or use default
         let region_id = env::var("REGION_ID")
             .unwrap_or_else(|_| "default".to_string());
             
-        // Set TEE type (this would typically come from attestation in a real system)
+        // Get TEE type from environment or use default
         let tee_type = env::var("TEE_TYPE")
             .unwrap_or_else(|_| "SGX".to_string());
             
-        // Initialize metrics store
-        let metrics_store = Arc::new(crate::metrics::MetricsStore::new(
-            worker_id.clone(),
-            region_id.clone(),
-            tee_type.clone()
-        ));
+        // Get discovery endpoint
+        let discovery_endpoint = env::var("DISCOVERY_ENDPOINT")
+            .unwrap_or_else(|_| "localhost:50052".to_string());
         
-        // Initialize routing strategy with metrics
-        let routing_strategy = Some(Arc::new(crate::metrics::RoutingStrategy::new(
-            metrics_store.clone()
-        )));
+        // Initialize mesh coordinator if enabled
+        let mesh_coordinator = if mesh_enabled {
+            info!("Initializing mesh coordinator for region: {}", region_id);
+            
+            let mesh_config = MeshConfig {
+                region_id: region_id.clone(),
+                tee_id: worker_id.clone(),
+                endpoint: discovery_endpoint.clone(),
+                max_peers,
+                discovery_interval_sec: peer_refresh_interval_sec,
+                discovery_endpoint: discovery_endpoint,
+                circuit_breaker_threshold: Duration::from_millis(500), // Default 500ms threshold
+                peer_refresh_interval: Duration::from_secs(peer_refresh_interval_sec),
+            };
+            
+            match MeshCoordinator::new(mesh_config).await {
+                Ok(coordinator) => Some(Arc::new(coordinator)),
+                Err(e) => {
+                    error!("Failed to initialize mesh coordinator: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        let circuit_breaker_threshold = Duration::from_millis(circuit_breaker_threshold_ms);
         
         Self {
             simulator: Arc::new(RwLock::new(Simulator::new().await)),
@@ -127,13 +196,16 @@ impl HyperTeeController {
             worker_id,
             execution_mode,
             registered: Arc::new(RwLock::new(false)),
-            is_primary: Arc::new(RwLock::new(true)), // Default to primary
+            is_primary: Arc::new(RwLock::new(true)),
             paired_with: Arc::new(RwLock::new(None)),
             region_tee_pairs: Arc::new(RwLock::new(HashMap::new())),
-            metrics: metrics_store,
-            routing_strategy,
+            metrics: Arc::new(crate::metrics::MetricsStore::new()),
+            routing_strategy: None,
             region_id,
             tee_type,
+            mesh_coordinator,
+            mesh_enabled,
+            circuit_breaker_threshold,
         }
     }
 
@@ -219,7 +291,7 @@ impl HyperTeeController {
             status: "pending".to_string(),
             result: None,
             context: None,
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         });
         
         operation_id
@@ -235,7 +307,7 @@ impl HyperTeeController {
         if let Some(op) = operations.get_mut(operation_id) {
             op.status = "completed".to_string();
             op.result = Some(result);
-            op.timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            op.timestamp = chrono::Utc::now().to_rfc3339();
             Ok(())
         } else {
             Err(TeeError::Contract(format!("Operation {} not found", operation_id)))
@@ -1049,10 +1121,10 @@ impl HyperTeeController {
             match &result {
                 Ok(_) => {
                     let elapsed = start_time.elapsed().as_millis() as u64;
-                    let _ = self.metrics.record_execution_success(elapsed).await;
+                    let _ = self.metrics.record_execution(&self.region_id, "enarx-worker", &self.worker_id, elapsed as f64, true, payload.input.len() as u64, 0).await;
                 },
                 Err(_) => {
-                    let _ = self.metrics.record_execution_failure().await;
+                    let _ = self.metrics.record_execution(&self.region_id, "enarx-worker", &self.worker_id, 0.0, false, payload.input.len() as u64, 0).await;
                 }
             }
             
@@ -1085,6 +1157,9 @@ impl HyperTeeController {
             routing_strategy: self.routing_strategy.clone(),
             region_id: self.region_id.clone(),
             tee_type: self.tee_type.clone(),
+            mesh_coordinator: self.mesh_coordinator.clone(),
+            mesh_enabled: self.mesh_enabled,
+            circuit_breaker_threshold: self.circuit_breaker_threshold,
         };
         
         let payload_clone = payload.clone();
@@ -1164,11 +1239,27 @@ impl HyperTeeController {
         
         // Record metrics for direct execution
         match &result {
-            Ok(_) => {
-                let _ = self.metrics.record_execution_success(execution_time_ms).await;
+            Ok(ref exec_result) => {
+                let _ = self.metrics.record_execution(
+                    &self.region_id,
+                    "Simulator",
+                    "sim-worker",
+                    execution_time_ms as f64,
+                    true,
+                    input.len() as u64,
+                    exec_result.len() as u64,
+                ).await;
             },
             Err(_) => {
-                let _ = self.metrics.record_execution_failure().await;
+                let _ = self.metrics.record_execution(
+                    &self.region_id,
+                    "Simulator",
+                    "sim-worker",
+                    0.0,
+                    false,
+                    input.len() as u64,
+                    0,
+                ).await;
             }
         }
         
@@ -1188,7 +1279,7 @@ impl HyperTeeController {
                         syscall_count: 0,
                     },
                     attestations: vec![TeeAttestation {
-                        enclave_id: vec![104, 121, 112, 101, 114], // "hyper" in ASCII
+                        enclave_id: vec![104, 121, 114, 101, 114], // "hyper" in ASCII
                         measurement: vec![0; 32],
                         timestamp: chrono::Utc::now().timestamp() as u64,
                         data: vec![0; 32],
@@ -1722,5 +1813,221 @@ impl HyperTeeController {
         
         // Verify state consistency and resolve conflicts if needed
         self.verify_state_consistency(contract_id, key, &primary_value, &secondary_value).await
+    }
+}
+
+// Execute operations via the mesh network
+impl HyperTeeController {
+    pub async fn execute_mesh(
+        &self,
+        target_tee: &str,
+        region_id: &str,
+        input: &[u8],
+        tee_type: TeeType,
+        timeout: Duration,
+        is_async: bool,
+        allow_fallback: bool,
+    ) -> Result<MeshExecutionResult, TeeError> {
+        info!("Executing task via mesh network: target={}, region={}", target_tee, region_id);
+        
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            error!("Mesh network is not enabled");
+            return Err(TeeError::ExecutionError("Mesh network is not enabled".to_string()));
+        }
+        
+        let start_time = std::time::Instant::now();
+        
+        // Execute via mesh coordinator
+        let result = match &self.mesh_coordinator {
+            Some(coordinator) => {
+                match coordinator.execute(
+                    target_tee.to_string(),
+                    region_id.to_string(),
+                    // Convert from tee_interface::TeeType to String
+                    match tee_type {
+                        TeeType::SGX => "SGX".to_string(),
+                        TeeType::SEV => "SEV".to_string(),
+                    },
+                    input.to_vec(),
+                    timeout,
+                    is_async,
+                    allow_fallback,
+                ).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        error!("Mesh execution failed: {:?}", e);
+                        
+                        // Try fallback to coordinator if enabled
+                        if allow_fallback && self.coordinator.is_some() {
+                            info!("Attempting fallback to coordinator execution");
+                            
+                            let coord_result = self.coordinated_execute_with_type(
+                                input, 
+                                region_id,
+                                tee_type.clone(),
+                            ).await?;
+                            
+                            // Convert coordinator result to mesh result
+                            let attestations = coord_result.attestations.iter()
+                                .map(|a| crate::mesh::Attestation {
+                                    enclave_type: format!("{:?}", a.enclave_type),
+                                    measurement: a.measurement.clone(),
+                                    timestamp: a.timestamp as u64,
+                                    platform_data: vec![0, 1, 2, 3], // Placeholder
+                                })
+                                .collect();
+                                
+                            return Ok(MeshExecutionResult {
+                                result: coord_result.result,
+                                state_hash: coord_result.state_hash.clone(),
+                                attestations,
+                                execution_time_ns: 0, // Not available from coordinator
+                                memory_used: 0,       // Not available from coordinator
+                                syscall_count: 0,     // Not available from coordinator
+                                status: "completed-via-fallback".to_string(),
+                                error: None,
+                                metrics: crate::mesh::PerformanceMetrics {
+                                    tee_type: format!("{:?}", tee_type),
+                                    region_id: region_id.to_string(),
+                                    worker_id: "coordinator-fallback".to_string(),
+                                    latency_ms: start_time.elapsed().as_millis() as f64,
+                                    execution_time_ns: 0,
+                                    network_latency_ms: start_time.elapsed().as_millis() as f64,
+                                    success_count: 1,
+                                    failure_count: 0,
+                                    memory_used_bytes: 0,
+                                    syscall_count: 0,
+                                    throughput_bytes_ps: 0,
+                                },
+                                cache_hit: false,
+                                cache_ttl_sec: None,
+                                execution_type: "fallback".to_string(),
+                            });
+                        }
+                        
+                        return Err(TeeError::ExecutionError(format!(
+                            "Mesh execution failed: {:?}", e
+                        )));
+                    }
+                }
+            },
+            None => {
+                return Err(TeeError::ExecutionError(
+                    "Mesh coordinator not initialized".to_string()
+                ));
+            }
+        };
+        
+        // Record metrics for the execution
+        self.metrics.record_execution(
+            &self.region_id,
+            match tee_type.clone() {
+                TeeType::SGX => "SGX",
+                TeeType::SEV => "SEV",
+            },
+            target_tee,
+            result.execution_time_ns as f64 / 1_000_000.0, // Convert ns to ms
+            true,  // Assume success if we get here
+            input.len() as u64,
+            result.result.len() as u64,
+        ).await;
+        
+        Ok(result)
+    }
+    
+    // Execute via coordinator with specific TEE type
+    async fn coordinated_execute_with_type(
+        &self,
+        input: &[u8],
+        region_id: &str,
+        tee_type: TeeType,
+    ) -> Result<ExecutionResult, TeeError> {
+        let payload = ExecutionPayload {
+            input: input.to_vec(),
+            params: ExecutionParams {
+                detailed_proof: true,
+                function_call: "execute".to_string(),
+                id_to: "default".to_string(),
+                expected_hash: Vec::new(), // Update to match the expected type
+            },
+            operation_id: Some(Uuid::new_v4().to_string()),
+            previous_operation_id: None,
+            operation_context: Some(format!("region:{},type:{:?}", region_id, tee_type).into_bytes()),
+        };
+        
+        self.coordinated_execute(&payload).await
+    }
+    
+    // Discover peers in the mesh network
+    pub async fn discover_peers(
+        &self,
+        region_id: &str,
+        tee_type: Option<TeeType>,
+        max_results: usize,
+    ) -> Result<Vec<PeerInfo>, TeeError> {
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            return Err(TeeError::ExecutionError("Mesh network is not enabled".to_string()));
+        }
+        
+        let coordinator = self.mesh_coordinator.as_ref().unwrap();
+        
+        match coordinator.discover_peers(
+            region_id.to_string(),
+            tee_type.map(|t| match t {
+                TeeType::SGX => "SGX".to_string(),
+                TeeType::SEV => "SEV".to_string(),
+            }),
+            max_results,
+        ).await {
+            Ok(peers) => Ok(peers),
+            Err(e) => Err(TeeError::ExecutionError(format!("Peer discovery failed: {:?}", e))),
+        }
+    }
+    
+    // Synchronize state with another TEE
+    pub async fn sync_state(
+        &self,
+        object_id: &str,
+        target_tee: &str,
+        use_deltas: bool,
+    ) -> Result<SyncResult, TeeError> {
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            return Err(TeeError::ExecutionError("Mesh network is not enabled".to_string()));
+        }
+        
+        let coordinator = self.mesh_coordinator.as_ref().unwrap();
+        
+        match coordinator.sync_state(
+            object_id.to_string(),
+            target_tee.to_string(),
+            use_deltas,
+        ).await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(TeeError::ExecutionError(format!("State sync failed: {:?}", e))),
+        }
+    }
+    
+    // Check if mesh should be used for execution based on the circuit breaker
+    async fn should_use_mesh(&self, region_id: &str, target_tee: &str) -> bool {
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            return false;
+        }
+        
+        // If execution mode is explicitly set, follow that
+        match self.execution_mode {
+            ExecutionMode::Mesh => return true,
+            ExecutionMode::Coordinated => return false,
+            ExecutionMode::Direct => return false,
+            ExecutionMode::Auto => {
+                // Use metrics to determine if mesh should be used
+                if let Some(avg_latency) = self.metrics.get_average_latency(region_id, target_tee).await {
+                    // Only use mesh if the latency is below the circuit breaker threshold
+                    return avg_latency < self.circuit_breaker_threshold.as_millis() as f64;
+                }
+                
+                // Default to coordinator if no metrics available
+                false
+            }
+        }
     }
 }
