@@ -11,7 +11,7 @@ use tee_interface::{
     ExecutionResult, 
     ExecutionStats, 
     TeeAttestation, 
-    Region, 
+    RegionInfo, 
     TeeError,
     TeeType
 };
@@ -187,9 +187,9 @@ impl TeeExecutor for SimulatorImpl {
         })
     }
 
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Return a single mock region
-        Ok(vec![Region {
+        Ok(vec![RegionInfo {
             id: "default".to_string(),
             worker_ids: vec!["worker-1".to_string()],
             max_tasks: 100,

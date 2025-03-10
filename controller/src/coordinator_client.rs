@@ -343,4 +343,39 @@ impl CoordinatorClient {
             Err(response_body.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
+
+    // Get available workers in a specific region
+    pub async fn get_workers_for_region(&self, region_id: &str) -> Result<Vec<Worker>, String> {
+        let url = format!("{}/workers/region/{}", self.base_url, region_id);
+        
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to get workers for region: {}", e))?;
+            
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(format!("Failed to get workers for region ({}): {}", status, error_text));
+        }
+        
+        let coordinator_response: CoordinatorResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse coordinator response: {}", e))?;
+            
+        if !coordinator_response.success {
+            return Err(coordinator_response.error.unwrap_or_else(|| "Unknown error".to_string()));
+        }
+        
+        let workers = coordinator_response.data
+            .ok_or_else(|| "No data in response".to_string())
+            .and_then(|data| {
+                serde_json::from_value(data)
+                    .map_err(|e| format!("Failed to parse workers data: {}", e))
+            })?;
+            
+        Ok(workers)
+    }
 }

@@ -56,6 +56,12 @@ pub struct HyperTeeController {
     is_primary: Arc<RwLock<bool>>,
     paired_with: Arc<RwLock<Option<String>>>,
     region_tee_pairs: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    
+    // Metrics and routing
+    metrics: Arc<crate::metrics::MetricsStore>,
+    routing_strategy: Option<Arc<crate::metrics::RoutingStrategy>>,
+    region_id: String,
+    tee_type: String,
 }
 
 impl HyperTeeController {
@@ -92,6 +98,26 @@ impl HyperTeeController {
             ExecutionMode::Direct
         };
         
+        // Get region ID from environment or use default
+        let region_id = env::var("REGION_ID")
+            .unwrap_or_else(|_| "default".to_string());
+            
+        // Set TEE type (this would typically come from attestation in a real system)
+        let tee_type = env::var("TEE_TYPE")
+            .unwrap_or_else(|_| "SGX".to_string());
+            
+        // Initialize metrics store
+        let metrics_store = Arc::new(crate::metrics::MetricsStore::new(
+            worker_id.clone(),
+            region_id.clone(),
+            tee_type.clone()
+        ));
+        
+        // Initialize routing strategy with metrics
+        let routing_strategy = Some(Arc::new(crate::metrics::RoutingStrategy::new(
+            metrics_store.clone()
+        )));
+        
         Self {
             simulator: Arc::new(RwLock::new(Simulator::new().await)),
             contracts: Arc::new(RwLock::new(HashMap::new())),
@@ -104,6 +130,10 @@ impl HyperTeeController {
             is_primary: Arc::new(RwLock::new(true)), // Default to primary
             paired_with: Arc::new(RwLock::new(None)),
             region_tee_pairs: Arc::new(RwLock::new(HashMap::new())),
+            metrics: metrics_store,
+            routing_strategy,
+            region_id,
+            tee_type,
         }
     }
 
@@ -541,11 +571,35 @@ impl HyperTeeController {
         // Ensure we're registered first
         self.initialize_coordinator().await?;
         
-        // Get the TEE pair for this region
-        let (worker1, worker2) = coordinator.get_tee_pair(region_id)
+        // Get all available workers for this region
+        let available_workers = coordinator.get_workers_for_region(region_id)
             .await
-            .map_err(|e| TeeError::ExecutionError(format!("Failed to get TEE pair: {}", e)))?;
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to get workers for region {}: {}", region_id, e)))?;
             
+        if available_workers.len() < 2 {
+            return Err(TeeError::ExecutionError(format!("Not enough workers available in region {}", region_id)));
+        }
+        
+        // Select the best workers based on metrics if routing strategy is available
+        let selected_workers = if let Some(routing_strategy) = &self.routing_strategy {
+            // Convert available workers to worker IDs
+            let worker_ids: Vec<String> = available_workers.iter().map(|w| w.id.clone()).collect();
+            
+            // Use routing strategy to select best workers
+            let best_workers = routing_strategy.select_best_workers(worker_ids, 2).await;
+            if best_workers.len() < 2 {
+                // Fall back to first two available workers if not enough best workers
+                vec![available_workers[0].id.clone(), available_workers[1].id.clone()]
+            } else {
+                best_workers
+            }
+        } else {
+            // Fall back to first two available workers
+            vec![available_workers[0].id.clone(), available_workers[1].id.clone()]
+        };
+        
+        println!("Selected workers for task: {:?}", selected_workers);
+        
         // Create mock attestations for now
         let attestations = vec![
             b"attestation-1".to_vec(),
@@ -556,7 +610,7 @@ impl HyperTeeController {
         let task_id = coordinator.submit_task(
             data,
             region_id,
-            vec![worker1, worker2],
+            selected_workers,
             attestations,
         )
         .await
@@ -614,8 +668,10 @@ impl HyperTeeController {
     
     // Execute a task through the coordinator
     async fn coordinated_execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
-        // Use default region ID since it's not in the payload
-        let region_id = "default".to_string();
+        // Always use the controller's configured region - this ensures proximity-based routing
+        let region_id = self.region_id.clone();
+        
+        println!("Executing in region: {}", region_id);
         
         // Serialize the payload
         let payload_data = serde_json::to_vec(payload)
@@ -789,7 +845,7 @@ impl HyperTeeController {
             // Mathematical operations
             "add" | "sum" => {
                 if parts.len() >= 3 {
-                    if let (Ok(a), Ok(b)) = (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                    if let (Ok(a), Ok(b)) = (parts[1].trim().parse::<u64>(), parts[2].trim().parse::<u64>()) {
                         return (a + b).to_string().as_bytes().to_vec();
                     }
                 }
@@ -797,7 +853,7 @@ impl HyperTeeController {
             },
             "multiply" => {
                 if parts.len() >= 3 {
-                    if let (Ok(a), Ok(b)) = (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                    if let (Ok(a), Ok(b)) = (parts[1].trim().parse::<u64>(), parts[2].trim().parse::<u64>()) {
                         return (a * b).to_string().as_bytes().to_vec();
                     }
                 }
@@ -987,7 +1043,20 @@ impl HyperTeeController {
         if self.execution_mode == ExecutionMode::Coordinated && self.coordinator.is_some() {
             // Execute via coordinator
             println!("Executing in coordinated mode");
-            return self.coordinated_execute(payload).await;
+            let result = self.coordinated_execute(payload).await;
+            
+            // Record metrics based on the result
+            match &result {
+                Ok(_) => {
+                    let elapsed = start_time.elapsed().as_millis() as u64;
+                    let _ = self.metrics.record_execution_success(elapsed).await;
+                },
+                Err(_) => {
+                    let _ = self.metrics.record_execution_failure().await;
+                }
+            }
+            
+            return result;
         }
         
         // Direct execution mode - continues with existing implementation
@@ -1012,6 +1081,10 @@ impl HyperTeeController {
             is_primary: self.is_primary.clone(),
             paired_with: self.paired_with.clone(),
             region_tee_pairs: self.region_tee_pairs.clone(),
+            metrics: self.metrics.clone(),
+            routing_strategy: self.routing_strategy.clone(),
+            region_id: self.region_id.clone(),
+            tee_type: self.tee_type.clone(),
         };
         
         let payload_clone = payload.clone();
@@ -1087,6 +1160,17 @@ impl HyperTeeController {
         
         // Calculate execution time
         let execution_time = start_time.elapsed();
+        let execution_time_ms = execution_time.as_millis() as u64;
+        
+        // Record metrics for direct execution
+        match &result {
+            Ok(_) => {
+                let _ = self.metrics.record_execution_success(execution_time_ms).await;
+            },
+            Err(_) => {
+                let _ = self.metrics.record_execution_failure().await;
+            }
+        }
         
         // Prepare result
         match result {
@@ -1099,7 +1183,7 @@ impl HyperTeeController {
                     result: data_vec,
                     state_hash: vec![],
                     stats: ExecutionStats {
-                        execution_time: execution_time.as_millis() as u64,
+                        execution_time: execution_time_ms,
                         memory_used: 0,
                         syscall_count: 0,
                     },
