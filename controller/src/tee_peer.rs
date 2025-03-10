@@ -107,6 +107,16 @@ impl TeePeerService {
             .cloned()
     }
 
+    /// Get the TEE ID for this peer
+    pub fn get_tee_id(&self) -> &String {
+        &self.tee_id
+    }
+    
+    /// Get the region ID for this peer
+    pub fn get_region_id(&self) -> &String {
+        &self.region_id
+    }
+    
     /// Start the peer discovery and communication service
     pub async fn start(self, address: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
         let peer_service = Arc::new(self);
