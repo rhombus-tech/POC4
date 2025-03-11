@@ -300,6 +300,8 @@ async fn main() -> Result<(), std::io::Error> {
             discovery_interval_sec: args.peer_refresh_interval_sec,
             circuit_breaker_threshold: Duration::from_millis(args.circuit_breaker_threshold_ms),
             peer_refresh_interval: Duration::from_secs(args.peer_refresh_interval_sec),
+            enhanced_discovery: false, // Using the traditional discovery service by default
+            enhanced_discovery_config: None, // Can be configured via command line args in the future
         };
         Some(config)
     } else {

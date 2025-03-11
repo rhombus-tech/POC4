@@ -51,6 +51,9 @@ pub struct MeshConfig {
     pub discovery_endpoint: String,
     pub circuit_breaker_threshold: Duration,
     pub peer_refresh_interval: Duration,
+    // Add configuration for enhanced discovery service
+    pub enhanced_discovery: bool,
+    pub enhanced_discovery_config: Option<DiscoveryServiceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1227,4 +1230,10 @@ pub struct Attestation {
     pub measurement: Vec<u8>,
     pub timestamp: u64,
     pub platform_data: Vec<u8>,
+}
+
+// DiscoveryServiceConfig is a placeholder for the enhanced discovery configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryServiceConfig {
+    // Add fields for enhanced discovery configuration here
 }

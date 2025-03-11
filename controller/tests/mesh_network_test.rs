@@ -58,6 +58,8 @@ impl TestTeeNode {
             discovery_endpoint: discovery_endpoint.to_string(),
             circuit_breaker_threshold: Duration::from_secs(3),
             peer_refresh_interval: Duration::from_secs(30),
+            enhanced_discovery: false, // Initially set to false for backward compatibility
+            enhanced_discovery_config: None, // Using the default discovery service for tests
         };
         
         // Initialize mesh coordinator
