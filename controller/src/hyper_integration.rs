@@ -16,7 +16,8 @@ use std::env;
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
 use log::{info, warn, error, debug};
-use crate::mesh::{MeshCoordinator, MeshConfig, MeshExecutionResult, PeerInfo, SyncResult, TeeType as MeshTeeType};
+use crate::mesh::{MeshCoordinator, MeshConfig, MeshExecutionResult, PeerInfo, SyncResult};
+use crate::policy::{SharedPolicyManager, Policy, PolicyRule, Transaction, PolicyViolation, CircuitBreaker, CircuitBreakerLevel, TriggerCondition, RecoveryCondition, CircuitBreakerAction};
 
 // Define a constant for default gas limits
 const DEFAULT_GAS: u64 = 1_000_000;
@@ -83,6 +84,10 @@ pub struct HyperTeeController {
     mesh_coordinator: Option<Arc<MeshCoordinator>>,
     mesh_enabled: bool,
     circuit_breaker_threshold: Duration,
+    
+    // Policy enforcement
+    policy_manager: Option<Arc<SharedPolicyManager>>,
+    policy_enforcement_enabled: bool,
 }
 
 impl HyperTeeController {
@@ -206,6 +211,8 @@ impl HyperTeeController {
             mesh_coordinator,
             mesh_enabled,
             circuit_breaker_threshold,
+            policy_manager: None,
+            policy_enforcement_enabled: false,
         }
     }
 
@@ -1108,6 +1115,46 @@ impl HyperTeeController {
         &self,
         payload: &ExecutionPayload,
     ) -> Result<ExecutionResult, TeeError> {
+        // Check policy compliance for the execution payload
+        if self.policy_enforcement_enabled {
+            if let Some(ref policy_manager) = self.policy_manager {
+                // Create a transaction from the execution payload
+                let transaction = Transaction {
+                    id: payload.operation_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    sender: "system".to_string(), // Default sender
+                    recipient: Some(payload.params.id_to.clone()),
+                    amount: 0, // Default amount
+                    contract_id: Some(payload.params.id_to.clone()),
+                    function: Some(payload.params.function_call.clone()),
+                    parameters: Some(payload.input.clone()),
+                    region_id: self.region_id.clone(), // Use controller's region
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                // Check if the transaction complies with policies
+                match policy_manager.check_transaction(&transaction).await {
+                    Ok(_) => {
+                        // Transaction is allowed, proceed with execution
+                    }
+                    Err(violation) => {
+                        // Transaction violates policy
+                        return Err(TeeError::ExecutionError(format!("Policy violation: {}", violation)));
+                    }
+                }
+                
+                // Check if any circuit breakers are active for this region
+                let circuit_breaker_status = policy_manager.get_circuit_breaker_status(self.region_id.as_str()).await;
+                for (breaker_id, is_active) in circuit_breaker_status {
+                    if is_active {
+                        // Circuit breaker is active, execution should be blocked
+                        return Err(TeeError::ExecutionError(
+                            format!("Circuit breaker '{}' is active. Execution blocked.", breaker_id)
+                        ));
+                    }
+                }
+            }
+        }
+        
         // Record start time for stats
         let start_time = std::time::Instant::now();
         
@@ -1160,6 +1207,8 @@ impl HyperTeeController {
             mesh_coordinator: self.mesh_coordinator.clone(),
             mesh_enabled: self.mesh_enabled,
             circuit_breaker_threshold: self.circuit_breaker_threshold,
+            policy_manager: self.policy_manager.clone(),
+            policy_enforcement_enabled: self.policy_enforcement_enabled,
         };
         
         let payload_clone = payload.clone();
@@ -1245,7 +1294,7 @@ impl HyperTeeController {
                     "Simulator",
                     "sim-worker",
                     execution_time_ms as f64,
-                    true,
+                    true,  // Assume success if we get here
                     input.len() as u64,
                     exec_result.len() as u64,
                 ).await;
@@ -1322,12 +1371,12 @@ impl HyperTeeController {
         // Return mock attestations for the requested region
         Ok(vec![
             TeeAttestation {
-                enclave_id: vec![104, 121, 112, 101, 114], // "hyper" in ASCII
-                measurement: vec![0; 32],
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                data: vec![0; 32],
-                signature: vec![0; 64],
-                region_proof: Some(vec![0; 32]),
+                enclave_id: b"test-enclave-id".to_vec(),
+                measurement: b"test-measurement".to_vec(),
+                timestamp: 1234567890,
+                data: b"test-data".to_vec(),
+                signature: b"test-signature".to_vec(),
+                region_proof: Some(b"test-region-proof".to_vec()),
                 enclave_type: TeeType::SGX,
             },
         ])
@@ -1351,6 +1400,46 @@ impl HyperTeeController {
 #[async_trait]
 impl TeeExecutor for HyperTeeController {
     async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
+        // Check policy compliance for the execution payload
+        if self.policy_enforcement_enabled {
+            if let Some(ref policy_manager) = self.policy_manager {
+                // Create a transaction from the execution payload
+                let transaction = Transaction {
+                    id: payload.operation_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    sender: "system".to_string(), // Default sender
+                    recipient: Some(payload.params.id_to.clone()),
+                    amount: 0, // Default amount
+                    contract_id: Some(payload.params.id_to.clone()),
+                    function: Some(payload.params.function_call.clone()),
+                    parameters: Some(payload.input.clone()),
+                    region_id: self.region_id.clone(), // Use controller's region
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                // Check if the transaction complies with policies
+                match policy_manager.check_transaction(&transaction).await {
+                    Ok(_) => {
+                        // Transaction is allowed, proceed with execution
+                    }
+                    Err(violation) => {
+                        // Transaction violates policy
+                        return Err(TeeError::ExecutionError(format!("Policy violation: {}", violation)));
+                    }
+                }
+                
+                // Check if any circuit breakers are active for this region
+                let circuit_breaker_status = policy_manager.get_circuit_breaker_status(self.region_id.as_str()).await;
+                for (breaker_id, is_active) in circuit_breaker_status {
+                    if is_active {
+                        // Circuit breaker is active, execution should be blocked
+                        return Err(TeeError::ExecutionError(
+                            format!("Circuit breaker '{}' is active. Execution blocked.", breaker_id)
+                        ));
+                    }
+                }
+            }
+        }
+        
         // When using coordinator, submit task to coordinator
         if let Ok(use_coordinator) = env::var("USE_COORDINATOR") {
             if use_coordinator == "true" {
@@ -1921,7 +2010,7 @@ impl HyperTeeController {
         // Record metrics for the execution
         self.metrics.record_execution(
             &self.region_id,
-            match tee_type.clone() {
+            match tee_type {
                 TeeType::SGX => "SGX",
                 TeeType::SEV => "SEV",
             },
@@ -2028,6 +2117,145 @@ impl HyperTeeController {
                 // Default to coordinator if no metrics available
                 false
             }
+        }
+    }
+}
+
+impl HyperTeeController {
+    // Initialize policy manager with default policies
+    pub async fn initialize_policy_manager(&mut self) -> Result<(), TeeError> {
+        let policy_manager = Arc::new(SharedPolicyManager::new());
+        
+        // Create default policies for each region
+        let regions = self.get_regions().await.unwrap_or_default();
+        
+        for region in regions {
+            let region_id = region.id.clone();
+            
+            // Create a basic policy for the region with transaction limits
+            let mut region_policy = Policy::new(
+                region_id.as_str(),
+                "1.0",
+                Some(region_id.as_str())
+            );
+            
+            // Add default rules
+            // 1. Maximum transaction amount (in tokens)
+            region_policy.add_rule(PolicyRule::TransactionLimit {
+                max_amount: 1_000_000,
+                time_window_seconds: 3600,
+            });
+            
+            // 2. Limit transactions per hour
+            region_policy.add_rule(PolicyRule::RateLimiting {
+                max_transactions: 1000,
+                time_window_seconds: 3600,
+            });
+            
+            // 3. Add allowed contract types (example whitelist)
+            region_policy.add_rule(PolicyRule::AllowedContracts { 
+                contract_ids: vec!["payment_contract".to_string(), "token_contract".to_string()]
+            });
+            
+            // Add circuit breakers
+            // 1. Medium level circuit breaker for high transaction volume
+            region_policy.add_circuit_breaker(
+                CircuitBreaker {
+                    id: "high_volume".to_string(),
+                    level: CircuitBreakerLevel::Restricted,
+                    trigger_conditions: vec![
+                        TriggerCondition::TransactionVolume {
+                            threshold: 500,
+                            time_window_seconds: 60,
+                        }
+                    ],
+                    recovery_conditions: Some(vec![
+                        RecoveryCondition::TimeElapsed {
+                            seconds: 300,
+                        }
+                    ]),
+                    actions: vec![
+                        CircuitBreakerAction::LogWarning,
+                        CircuitBreakerAction::RejectSpecificContractCalls {
+                            contract_ids: vec!["high_risk_contract".to_string()],
+                        }
+                    ],
+                }
+            );
+            
+            // 2. High level circuit breaker for very high transaction values
+            region_policy.add_circuit_breaker(
+                CircuitBreaker {
+                    id: "high_value".to_string(),
+                    level: CircuitBreakerLevel::Critical,
+                    trigger_conditions: vec![
+                        TriggerCondition::TransactionVolume {
+                            threshold: 1_000_000,
+                            time_window_seconds: 60,
+                        }
+                    ],
+                    recovery_conditions: None, // Manual reset required
+                    actions: vec![
+                        CircuitBreakerAction::NotifyAdministrator {
+                            notification_method: "email".to_string(),
+                        },
+                        CircuitBreakerAction::RejectAllTransactions,
+                    ],
+                }
+            );
+            
+            // Add the policy to the policy manager
+            policy_manager.add_policy(region_policy).await;
+        }
+        
+        // Set the policy manager
+        self.policy_manager = Some(policy_manager);
+        
+        // Enable policy enforcement
+        self.policy_enforcement_enabled = true;
+        
+        Ok(())
+    }
+    
+    // Check if a transaction complies with policy
+    pub async fn check_policy_compliance(&self, transaction: &Transaction) -> Result<(), PolicyViolation> {
+        // If policy enforcement is not enabled, all transactions are allowed
+        if !self.policy_enforcement_enabled {
+            return Ok(());
+        }
+        
+        // If policy manager is not initialized, all transactions are allowed
+        if let Some(ref policy_manager) = self.policy_manager {
+            policy_manager.check_transaction(transaction).await
+        } else {
+            Ok(())
+        }
+    }
+    
+    // Reset circuit breaker
+    pub async fn reset_circuit_breaker(&self, region_id: &str, breaker_id: &str) -> Result<(), TeeError> {
+        if let Some(ref policy_manager) = self.policy_manager {
+            policy_manager.reset_circuit_breaker(region_id, breaker_id).await
+                .map_err(|e| TeeError::ExecutionError(format!("Failed to reset circuit breaker: {}", e)))
+        } else {
+            Err(TeeError::ExecutionError("Policy manager not initialized".to_string()))
+        }
+    }
+    
+    // Get current circuit breaker status
+    pub async fn get_circuit_breaker_status(&self, region_id: &str) -> Result<HashMap<String, bool>, TeeError> {
+        if let Some(ref policy_manager) = self.policy_manager {
+            Ok(policy_manager.get_circuit_breaker_status(region_id).await)
+        } else {
+            Err(TeeError::ExecutionError("Policy manager not initialized".to_string()))
+        }
+    }
+    
+    // Get a reference to the policy manager
+    pub async fn get_policy_manager(&self) -> Result<Arc<SharedPolicyManager>, TeeError> {
+        match &self.policy_manager {
+            Some(manager) => Ok(manager.clone()), // Clone the Arc to get a new reference
+            None => Err(TeeError::ExecutionError("Policy manager not initialized".to_string()))
         }
     }
 }

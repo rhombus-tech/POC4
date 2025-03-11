@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 use tonic::transport::{Channel, Server};
-use tonic::service::interceptor::InterceptedService;
 use tracing::{debug, error, info, warn};
 use std::net::SocketAddr;
 use chrono::Utc;
-use tee_interface::RegionInfo;
 
 use crate::proto::teeservice::{
     ExecutionRequest, ExecutionResult, 
@@ -73,7 +71,7 @@ pub struct TeePeerService {
     /// Registry of known TEE peers
     peers: TeeRegistry,
     /// Channel for sending execution requests to the TEE controller
-    execution_tx: mpsc::Sender<(ExecutionRequest, mpsc::Sender<Result<ExecutionResult, Status>>)>,
+    execution_tx: tokio::sync::mpsc::Sender<(ExecutionRequest, tokio::sync::mpsc::Sender<Result<ExecutionResult, Status>>)>,
 }
 
 impl TeePeerService {
@@ -81,7 +79,7 @@ impl TeePeerService {
     pub fn new(
         tee_id: String,
         region_id: String,
-        execution_tx: mpsc::Sender<(ExecutionRequest, mpsc::Sender<Result<ExecutionResult, Status>>)>,
+        execution_tx: tokio::sync::mpsc::Sender<(ExecutionRequest, tokio::sync::mpsc::Sender<Result<ExecutionResult, Status>>)>,
     ) -> Self {
         TeePeerService {
             tee_id,
@@ -231,7 +229,7 @@ impl TeeExecution for TeePeerServiceHandler {
         let execution_request = request.into_inner();
         
         // Create a channel for receiving the execution result
-        let (result_tx, mut result_rx) = mpsc::channel(1);
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel(1);
         
         // Forward the request to the TEE controller
         if let Err(e) = self.inner.execution_tx.send((execution_request.clone(), result_tx)).await {

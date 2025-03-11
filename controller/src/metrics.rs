@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::RwLock;
 use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
@@ -522,7 +522,7 @@ impl MetricsCollector {
     }
     
     /// Record success from a mesh execution
-    pub fn record_mesh_success(&self, result: &crate::mesh::MeshExecutionResult) {
+    pub fn record_mesh_success(&self, _result: &crate::mesh::MeshExecutionResult) {
         // Implementation would track metrics from mesh operations
     }
     

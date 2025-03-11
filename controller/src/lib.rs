@@ -9,6 +9,8 @@ pub mod tee_peer;
 pub mod tee_peer_client;
 pub mod metrics;
 pub mod mesh;
+pub mod policy;
+pub mod integration_tests;
 
 pub use simulator::SimulatorController;
 pub use enarx::EnarxController;
@@ -21,3 +23,7 @@ pub use tee_peer::TeePeerService;
 pub use tee_peer_client::TeeServiceClient;
 pub use metrics::{MetricsStore, RoutingStrategy, TeePerformanceMetrics};
 pub use mesh::{MeshCoordinator, MeshConfig};
+pub use policy::{Policy, PolicyManager, SharedPolicyManager, PolicyRule, CircuitBreaker, CircuitBreakerLevel};
+
+#[cfg(test)]
+mod policy_test;

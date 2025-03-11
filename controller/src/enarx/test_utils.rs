@@ -3,12 +3,11 @@ use std::fs;
 use std::env;
 use std::process::Command;
 use log::{info, error, warn};
-use crate::enarx::error::EnarxError;
-use tee_interface::TeeError;
-use crate::enarx::controller::EnarxController;
+use crate::enarx::{EnarxController, error::EnarxError};
+use tee_interface::{ExecutionPayload, ExecutionParams, ExecutionResult, TeeExecutor, TeeAttestation, TeeType, TeeError};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tee_interface::{ExecutionPayload, ExecutionParams, ExecutionResult, TeeExecutor, TeeType};
+use hex;
 
 // Simple WASM program that adds two integers
 // This is a minimal WebAssembly module in hex format that exports an "add" function

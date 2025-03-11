@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use log::{info, error, debug, warn};
-use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, Region, RegionInfo};
+use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, RegionInfo};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::time::Duration;
