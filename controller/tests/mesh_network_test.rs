@@ -1265,6 +1265,175 @@ async fn test_mesh_network_batch_vs_individual() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mesh_network_high_volume_batch() {
+    let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
+    
+    // Initialize the test harness
+    let mut harness = MeshTestHarness::new();
+    
+    // Start the discovery service
+    harness.start_discovery_service().await.unwrap();
+    
+    // Number of TEE pairs to create in a single region
+    const NUM_PAIRS: usize = 5;
+    
+    println!("\nTesting high volume batch throughput with {} TEE pairs", NUM_PAIRS);
+    
+    // Create multiple TEE pairs
+    for i in 0..NUM_PAIRS {
+        let pair_id = format!("pair{}", i + 1);
+        harness.create_tee_pair(&pair_id, "us-east-1", 8080 + i as u16).await.unwrap();
+        println!("Created TEE pair {}", pair_id);
+    }
+    
+    // Set realistic network latency
+    harness.set_network_latency(5);
+    
+    // Deploy contract to all nodes
+    harness.deploy_contract_to_all("kv_store", KV_STORE_CONTRACT).await.unwrap();
+    
+    // Number of operations per batch
+    const BATCH_SIZE: usize = 50;
+    // Number of batches per pair
+    const BATCHES_PER_PAIR: usize = 5;
+    // Total operations
+    const TOTAL_OPS: usize = NUM_PAIRS * BATCHES_PER_PAIR * BATCH_SIZE;
+    
+    println!("Starting {} total operations in {} batches across {} TEE pairs", 
+          TOTAL_OPS, NUM_PAIRS * BATCHES_PER_PAIR, NUM_PAIRS);
+    
+    // Set up batches for each pair
+    let mut batch_handles = Vec::with_capacity(NUM_PAIRS * BATCHES_PER_PAIR);
+    let start = std::time::Instant::now();
+    
+    for pair_idx in 0..NUM_PAIRS {
+        let pair_id = format!("pair{}", pair_idx + 1);
+        let pair = harness.tee_pairs.get(&pair_id).unwrap();
+        
+        // Use the SGX node of each pair to execute operations
+        let sgx_id = &pair.sgx_node_id;
+        let sev_id = &pair.sev_node_id;
+        let sgx_node = harness.nodes.get(sgx_id).unwrap().clone();
+        
+        for batch_idx in 0..BATCHES_PER_PAIR {
+            let node = sgx_node.clone();
+            let target_id = sev_id.clone();
+            let batch_global_idx = pair_idx * BATCHES_PER_PAIR + batch_idx;
+            
+            // Create a batch of operations
+            let mut batch_operations = Vec::with_capacity(BATCH_SIZE);
+            
+            for op_idx in 0..BATCH_SIZE {
+                let global_op_idx = batch_global_idx * BATCH_SIZE + op_idx;
+                let key = format!("key_batch_{}_{}", batch_global_idx, op_idx);
+                let value = format!("value_batch_{}_{}", batch_global_idx, op_idx);
+                let input = format!("{},{}", key, value).into_bytes();
+                
+                batch_operations.push(("kv_store".to_string(), "store".to_string(), input, target_id.clone()));
+            }
+            
+            // Spawn a task to execute the batch
+            let handle = tokio::spawn(async move {
+                let start_batch = std::time::Instant::now();
+                
+                match node.execute_batch_via_mesh(batch_operations).await {
+                    Ok(_) => {
+                        let duration = start_batch.elapsed();
+                        let latency_ms = duration.as_secs_f64() * 1000.0;
+                        (batch_global_idx, latency_ms, true, BATCH_SIZE)
+                    },
+                    Err(e) => {
+                        println!("Error executing batch {}: {}", batch_global_idx, e);
+                        (batch_global_idx, 0.0, false, 0)
+                    }
+                }
+            });
+            
+            batch_handles.push(handle);
+        }
+    }
+    
+    // Collect batch results
+    let mut batch_latencies = Vec::new();
+    let mut successful_ops = 0;
+    
+    for handle in batch_handles {
+        match handle.await {
+            Ok((id, latency, success, ops_count)) => {
+                if success {
+                    batch_latencies.push(latency);
+                    successful_ops += ops_count;
+                }
+            },
+            Err(e) => {
+                println!("Task join error: {:?}", e);
+            }
+        }
+    }
+    
+    let total_duration = start.elapsed();
+    let total_duration_ms = total_duration.as_secs_f64() * 1000.0;
+    
+    println!("All {} successful operations in {} batches completed in {:.2}ms", 
+         successful_ops, batch_latencies.len(), total_duration_ms);
+    
+    // Calculate metrics if we have results
+    if !batch_latencies.is_empty() {
+        batch_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        
+        let p50 = percentile(&batch_latencies, 50.0);
+        let p95 = percentile(&batch_latencies, 95.0);
+        let p99 = percentile(&batch_latencies, 99.0);
+        let max = batch_latencies.last().cloned().unwrap_or(0.0);
+        
+        println!("\nHigh volume batch performance metrics:");
+        println!("- p50 (median) batch latency: {:.2}ms", p50);
+        println!("- p95 batch latency: {:.2}ms", p95);
+        println!("- p99 batch latency: {:.2}ms", p99);
+        println!("- max batch latency: {:.2}ms", max);
+        println!("- avg operation latency: {:.2}ms (estimated)", 
+             batch_latencies.iter().sum::<f64>() / batch_latencies.len() as f64 / BATCH_SIZE as f64);
+        
+        if p95 <= 100.0 {
+            println!("✅ Performance meets the 100ms SLA requirement (p95 is {:.2}ms)", p95);
+        } else {
+            println!("❌ Performance exceeds the 100ms SLA requirement (p95 is {:.2}ms)", p95);
+        }
+        
+        // Calculate throughput - total operations per second
+        let throughput = successful_ops as f64 / (total_duration.as_secs_f64());
+        let throughput_per_pair = throughput / NUM_PAIRS as f64;
+        
+        println!("\nAggregate Batch Throughput: {:.2} operations/second", throughput);
+        println!("Average Throughput Per Pair: {:.2} operations/second", throughput_per_pair);
+        
+        // Print scalability projections
+        println!("\n======= TEE MESH NETWORK PERFORMANCE ANALYSIS WITH BATCHING =======");
+        println!("Current performance:");
+        println!("- Single TEE pair throughput: ~{:.2} TPS", throughput_per_pair);
+        println!("- 5 TEE pairs throughput: ~{:.2} TPS", throughput);
+        
+        // Project to larger deployments based on current performance
+        println!("\nProjected performance (based on linear scaling):");
+        println!("- 10 TEE pairs: ~{:.2} TPS", throughput_per_pair * 10.0);
+        println!("- 20 TEE pairs: ~{:.2} TPS", throughput_per_pair * 20.0);
+        println!("- 50 TEE pairs: ~{:.2} TPS", throughput_per_pair * 50.0);
+        println!("- 100 TEE pairs: ~{:.2} TPS", throughput_per_pair * 100.0);
+        
+        // Phase 1 optimization success
+        if throughput_per_pair > 10000.0 {
+            println!("\n✅ Phase 1 optimization goal GREATLY exceeded: {:.2} TPS per pair", throughput_per_pair);
+            println!("      Original target: 20-30K TPS with multiple TEE pairs");
+            println!("      Current projection for 30 pairs: {:.2} TPS", throughput_per_pair * 30.0);
+        } else if throughput_per_pair > 1000.0 {
+            println!("\n✅ Phase 1 optimization goal exceeded: {:.2} TPS per pair", throughput_per_pair);
+            println!("      Original target: 20-30K TPS with multiple TEE pairs");
+            println!("      Current projection for 30 pairs: {:.2} TPS", throughput_per_pair * 30.0);
+        }
+    }
+}
+
 // Define a simple key-value store contract for testing
 const KV_STORE_CONTRACT: &[u8] = b"
     // Simple key-value store contract
