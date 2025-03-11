@@ -4,9 +4,10 @@ use wasmlanche::{public, Address, Context};
 use tee_interface::prelude::*;
 use borsh::{BorshSerialize, BorshDeserialize};
 
-// Re-export the accumulator and verification modules
+// Re-export the accumulator, verification and discovery modules
 mod accumulator;
 mod verification;
+mod discovery;
 
 pub use accumulator::{
     AccumulatorParams,
@@ -19,6 +20,17 @@ pub use accumulator::{
 pub use verification::{
     VerificationResult,
     VerificationError,
+};
+
+pub use discovery::{
+    DiscoveryParams,
+    RegionInfo,
+    BatchAttestationResult,
+    register_with_region,
+    batch_register_attestations,
+    batch_verify_executors,
+    get_executors_by_region,
+    get_all_regions
 };
 
 // Contract functions that other contracts can call
@@ -53,6 +65,13 @@ pub fn verify_execution(
     verification::verify_execution(context, sgx_result, sev_result)
 }
 
+#[public]
+pub fn init_discovery(context: &mut Context, params: DiscoveryParams) -> Result<(), TeeError> {
+    // Initialize discovery service parameters
+    wasmlanche::set_state!(context, DiscoveryServiceParams, params);
+    Ok(())
+}
+
 // Re-export commonly used items in a prelude module
 pub mod prelude {
     pub use super::{
@@ -63,10 +82,14 @@ pub mod prelude {
         AttestationRecord,
         VerificationResult,
         VerificationError,
+        DiscoveryParams,
+        RegionInfo,
+        BatchAttestationResult,
         init,
         register_attestation,
         verify_attestation,
         verify_execution,
+        init_discovery,
     };
 }
 

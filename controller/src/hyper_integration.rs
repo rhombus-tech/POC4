@@ -177,6 +177,8 @@ impl HyperTeeController {
                 discovery_endpoint: discovery_endpoint,
                 circuit_breaker_threshold: Duration::from_millis(500), // Default 500ms threshold
                 peer_refresh_interval: Duration::from_secs(peer_refresh_interval_sec),
+                enhanced_discovery: false, // Disable enhanced discovery by default
+                enhanced_discovery_config: None, // No enhanced discovery config by default
             };
             
             match MeshCoordinator::new(mesh_config).await {
