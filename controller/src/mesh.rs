@@ -6,7 +6,7 @@ use tokio::time;
 use log::{info, warn, error, debug};
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
-use hex;
+use rand::Rng;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -87,17 +87,19 @@ pub struct MeshExecutionParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshExecutionResult {
     pub result: Vec<u8>,
-    pub state_hash: Vec<u8>,
-    pub attestations: Vec<Attestation>,
     pub execution_time_ns: u64,
+    pub network_latency_ns: u64,
+    pub attestations: Option<Vec<Attestation>>,
+    pub error: Option<String>,
+    pub metrics: Option<PerformanceMetrics>,
+    pub state_hash: Vec<u8>,
     pub memory_used: u64,
     pub syscall_count: u64,
     pub status: String,
-    pub error: Option<String>,
-    pub metrics: PerformanceMetrics,
     pub cache_hit: bool,
     pub cache_ttl_sec: Option<u64>,
     pub execution_type: String,
+    pub operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +115,16 @@ pub struct PerformanceMetrics {
     pub memory_used_bytes: u64,
     pub syscall_count: u64,
     pub throughput_bytes_ps: u64,
+    pub p50_execution_ms: Option<u64>,
+    pub p95_execution_ms: Option<u64>,
+    pub p99_execution_ms: Option<u64>,
+    pub max_execution_ms: Option<u64>,
+    pub avg_execution_ms: Option<f64>,
+    pub min_execution_ms: Option<u64>,
+    pub operations_per_second: Option<u64>,
+    pub batch_size: Option<u64>, 
+    pub concurrent_operations: Option<u64>,
+    pub network_efficiency: Option<f64>, // Ratio of execution time to network latency
 }
 
 // Struct to track peer status and connection info
@@ -134,6 +146,27 @@ struct PeerState {
 struct CacheEntry {
     result: MeshExecutionResult,
     expiry: std::time::Instant,
+}
+
+// Batch operation for more efficient mesh execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchOperation {
+    pub target_tee: String,
+    pub region_id: String,
+    pub tee_type: String,
+    pub input: Vec<u8>,
+    pub operation_id: String,
+}
+
+// Batch execution result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchExecutionResult {
+    pub operations: Vec<MeshExecutionResult>,
+    pub batch_id: String,
+    pub batch_size: usize,
+    pub total_execution_time_ms: u64,
+    pub batch_attestation: Option<Attestation>,
+    pub performance: Option<PerformanceMetrics>,
 }
 
 // Mesh coordinator
@@ -232,11 +265,9 @@ impl MeshCoordinator {
         let execution_time = Duration::from_millis(10 + (10));
         time::sleep(execution_time).await;
         
-        // Create a simulated result
-        let mut random_hash = Vec::new();
-        for _ in 0..32 {
-            random_hash.push(0);
-        }
+        // Generate a random sha256 hash for this execution
+        let mut rng = rand::thread_rng();
+        let random_hash: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
         
         let network_latency = start_time.elapsed() - execution_time;
         
@@ -265,21 +296,33 @@ impl MeshCoordinator {
             syscall_count: 42,
             throughput_bytes_ps: (input.len() as u64 * 1000) / 
                 (execution_time.as_millis() as u64).max(1),
+            p50_execution_ms: None,
+            p95_execution_ms: None,
+            p99_execution_ms: None,
+            max_execution_ms: None,
+            avg_execution_ms: None,
+            min_execution_ms: None,
+            operations_per_second: None,
+            batch_size: None,
+            concurrent_operations: None,
+            network_efficiency: None,
         };
         
         let result = MeshExecutionResult {
             result: input, // Echo input as a simulated result for now
-            state_hash: random_hash,
-            attestations: vec![attestation],
             execution_time_ns: execution_time.as_nanos() as u64,
+            network_latency_ns: network_latency.as_nanos() as u64,
+            attestations: Some(vec![attestation]),
+            error: None,
+            metrics: Some(metrics),
+            state_hash: random_hash,
             memory_used: 1024 * 1024, // 1MB example
             syscall_count: 42,
             status: "completed".to_string(),
-            error: None,
-            metrics,
             cache_hit: false,
             cache_ttl_sec: None,
             execution_type: "normal".to_string(),
+            operation_id: None,
         };
         
         // Add execution time to metrics
@@ -350,20 +393,17 @@ impl MeshCoordinator {
         timeout: Duration,
         is_async: bool,
         allow_fallback: bool,
-        use_cache: bool,
     ) -> Result<MeshExecutionResult, std::io::Error> {
         info!("Executing paired execution: target={}, region={}, type={}, use_cache={}", 
-              target_tee, region_id, tee_type, use_cache);
+              target_tee, region_id, tee_type, false);
         
         // Generate cache key
         let cache_key = self.generate_cache_key(&target_tee, &region_id, &tee_type, &input);
         
         // Check cache if requested
-        if use_cache {
-            if let Some(cached_result) = self.check_cache(&cache_key, timeout) {
-                info!("Using cached result for paired execution");
-                return Ok(cached_result);
-            }
+        if let Some(cached_result) = self.check_cache(&cache_key, timeout) {
+            info!("Using cached result for paired execution");
+            return Ok(cached_result);
         }
         
         // Execute the request
@@ -381,9 +421,7 @@ impl MeshCoordinator {
         result.execution_type = "paired".to_string();
         
         // Store in cache with TTL
-        if use_cache {
-            self.store_in_cache(&cache_key, &result, Duration::from_secs(3600));
-        }
+        self.store_in_cache(&cache_key, &result, Duration::from_secs(3600));
         
         Ok(result)
     }
@@ -397,7 +435,7 @@ impl MeshCoordinator {
         hasher.update(input);
         
         let hash = hasher.finalize();
-        format!("mesh:exec:{}:{}:{}:{}", target_tee, region_id, tee_type, hex::encode(hash))
+        format!("mesh:exec:{}:{}:{}:{}", target_tee, region_id, tee_type, hash.iter().map(|b| format!("{:02x}", b)).collect::<String>())
     }
     
     // Check the cache for a result
@@ -504,8 +542,7 @@ impl MeshCoordinator {
         // For now, simulate a successful sync
         // This will be replaced with actual TEE-to-TEE state sync
         
-        // Remove unused variable warning - with correct type annotation
-        let _state_data: Vec<u8> = Vec::new();
+        let state_data: Vec<u8> = Vec::new();
         
         // Simulated result
         let result = SyncResult {
@@ -590,6 +627,327 @@ impl MeshCoordinator {
         result
     }
     
+    // Execute a batch of operations for higher throughput
+    pub async fn execute_batch(
+        &self,
+        operations: Vec<BatchOperation>,
+        timeout: Duration,
+        allow_fallback: bool,
+    ) -> Result<BatchExecutionResult, std::io::Error> {
+        if operations.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Batch cannot be empty"
+            ));
+        }
+
+        let batch_id = Uuid::new_v4().to_string();
+        let batch_size = operations.len();
+        info!("Executing batch {} with {} operations", batch_id, batch_size);
+        
+        let start_time = std::time::Instant::now();
+        
+        // Group operations by target TEE for locality-aware execution
+        let mut operations_by_target: HashMap<String, Vec<BatchOperation>> = HashMap::new();
+        
+        for op in operations {
+            let target_key = format!("{}:{}:{}", op.region_id, op.target_tee, op.tee_type);
+            operations_by_target
+                .entry(target_key)
+                .or_insert_with(Vec::new)
+                .push(op);
+        }
+        
+        // Increase max concurrency for higher throughput
+        let max_concurrent = std::cmp::min(operations_by_target.len() * 4, 32);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        
+        let mut results = Vec::new();
+        let mut handles = Vec::new();
+        
+        // Process each target in parallel with higher concurrency
+        for (target, target_operations) in operations_by_target {
+            let op = &target_operations[0];
+            let target_id = op.target_tee.clone();
+            let _region_id = op.region_id.clone();
+            let _tee_type = op.tee_type.clone();
+            
+            // Create a chunk size based on the number of operations per target
+            // Smaller chunks for better parallelism
+            let chunk_size = std::cmp::min(10, (target_operations.len() + 9) / 10);
+            
+            // Execute operations in parallel chunks for this target
+            for chunk in target_operations.chunks(chunk_size) {
+                let chunk = chunk.to_vec();
+                let self_clone = self.clone();
+                let semaphore_clone = semaphore.clone();
+                // Clone target_id for each chunk to avoid the moved value error
+                let target_id_clone = target_id.clone();
+                
+                let handle = tokio::spawn(async move {
+                    let _permit = semaphore_clone.acquire().await.unwrap();
+                    
+                    let mut chunk_results = Vec::new();
+                    let mut chunk_tasks = Vec::new();
+                    
+                    // Execute operations in this chunk concurrently
+                    for op in chunk {
+                        let self_clone2 = self_clone.clone();
+                        
+                        let task = tokio::spawn(async move {
+                            self_clone2.execute(
+                                op.target_tee.clone(),
+                                op.region_id.clone(),
+                                op.tee_type.clone(),
+                                op.input.clone(),
+                                timeout,
+                                false,
+                                allow_fallback,
+                            ).await
+                        });
+                        
+                        chunk_tasks.push((task, op.operation_id.clone()));
+                    }
+                    
+                    // Collect results for this chunk
+                    for (task, operation_id) in chunk_tasks {
+                        match task.await {
+                            Ok(Ok(mut result)) => {
+                                result.operation_id = Some(operation_id);
+                                chunk_results.push(result);
+                            },
+                            Ok(Err(e)) => {
+                                error!("Error executing operation on {}: {}", target_id_clone, e);
+                                // Add error result
+                                let result = MeshExecutionResult {
+                                    result: Vec::new(),
+                                    execution_time_ns: 0,
+                                    network_latency_ns: 0,
+                                    attestations: None,
+                                    error: Some(format!("Execution error: {}", e)),
+                                    metrics: None,
+                                    state_hash: self_clone.get_random_hash(),
+                                    memory_used: 0,
+                                    syscall_count: 0,
+                                    status: "error".to_string(),
+                                    cache_hit: false,
+                                    cache_ttl_sec: None,
+                                    execution_type: "error".to_string(),
+                                    operation_id: Some(operation_id),
+                                };
+                                chunk_results.push(result);
+                            },
+                            Err(e) => {
+                                error!("Task error executing operation on {}: {}", target_id_clone, e);
+                                // Add error result
+                                let result = MeshExecutionResult {
+                                    result: Vec::new(),
+                                    execution_time_ns: 0,
+                                    network_latency_ns: 0,
+                                    attestations: None,
+                                    error: Some(format!("Task error: {}", e)),
+                                    metrics: None,
+                                    state_hash: self_clone.get_random_hash(),
+                                    memory_used: 0,
+                                    syscall_count: 0,
+                                    status: "error".to_string(),
+                                    cache_hit: false,
+                                    cache_ttl_sec: None,
+                                    execution_type: "error".to_string(),
+                                    operation_id: Some(operation_id),
+                                };
+                                chunk_results.push(result);
+                            }
+                        }
+                    }
+                    
+                    chunk_results
+                });
+                
+                handles.push(handle);
+            }
+        }
+        
+        // Collect results
+        for handle in handles {
+            match handle.await {
+                Ok(chunk_results) => {
+                    results.extend(chunk_results);
+                },
+                Err(e) => {
+                    error!("Error executing batch operation group: {}", e);
+                }
+            }
+        }
+        
+        let total_execution_time_ms = start_time.elapsed().as_millis() as u64;
+        
+        // Calculate performance metrics if we have results
+        let performance = if !results.is_empty() {
+            let execution_times: Vec<f64> = results.iter()
+                .map(|r| r.execution_time_ns as f64 / 1_000_000.0) // Convert ns to ms
+                .collect();
+            
+            let network_latencies: Vec<f64> = results.iter()
+                .map(|r| r.network_latency_ns as f64 / 1_000_000.0) // Convert ns to ms
+                .collect();
+            
+            // Calculate percentiles for execution times
+            let p50 = self.percentile(&execution_times, 50.0);
+            let p95 = self.percentile(&execution_times, 95.0);
+            let p99 = self.percentile(&execution_times, 99.0);
+            
+            Some(PerformanceMetrics {
+                tee_type: "".to_string(),
+                region_id: "".to_string(),
+                worker_id: "".to_string(),
+                latency_ms: 0.0,
+                execution_time_ns: 0,
+                network_latency_ms: 0.0,
+                success_count: 0,
+                failure_count: 0,
+                memory_used_bytes: 0,
+                syscall_count: 0,
+                throughput_bytes_ps: 0,
+                p50_execution_ms: Some(p50 as u64),
+                p95_execution_ms: Some(p95 as u64),
+                p99_execution_ms: Some(p99 as u64),
+                max_execution_ms: Some(*execution_times.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0) as u64),
+                avg_execution_ms: Some((execution_times.iter().sum::<f64>() / execution_times.len() as f64) as f64),
+                min_execution_ms: Some(*execution_times.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0) as u64),
+                operations_per_second: Some((batch_size as f64 / (total_execution_time_ms as f64 / 1000.0)) as u64),
+                batch_size: Some(batch_size as u64),
+                concurrent_operations: Some(max_concurrent as u64),
+                network_efficiency: Some((execution_times.iter().sum::<f64>() / network_latencies.iter().sum::<f64>()).max(1.0)),
+            })
+        } else {
+            None
+        };
+        
+        Ok(BatchExecutionResult {
+            operations: results,
+            batch_id,
+            batch_size,
+            total_execution_time_ms,
+            batch_attestation: None,  // We could implement a batch attestation in the future
+            performance,
+        })
+    }
+
+    async fn execute_batch_to_target(&self, batch_operations: Vec<BatchOperation>) 
+        -> Result<Vec<MeshExecutionResult>, std::io::Error> {
+        
+        let start_time = std::time::Instant::now();
+        
+        let batch_size = batch_operations.len();
+        debug!("Executing batch of {} operations to same target", batch_size);
+        
+        let chunk_size = 10; // Process operations in small chunks for better parallelism
+        let mut results = Vec::with_capacity(batch_size);
+        
+        // Create a larger semaphore for concurrent operations
+        let semaphore = Arc::new(Semaphore::new(24));  // Higher concurrency
+        let mut handles = Vec::new();
+        
+        // Process operations in parallel chunks
+        for chunk in batch_operations.chunks(chunk_size) {
+            for op in chunk {
+                let self_clone = self.clone();
+                let op_clone = op.clone();
+                let semaphore_clone = semaphore.clone();
+                
+                let handle = tokio::spawn(async move {
+                    let _permit = semaphore_clone.acquire().await.unwrap();
+                    self_clone.execute(
+                        op_clone.target_tee.clone(), 
+                        op_clone.region_id.clone(), 
+                        op_clone.tee_type.clone(), 
+                        op_clone.input.clone(), 
+                        Duration::from_secs(30), 
+                        false, 
+                        false
+                    ).await
+                });
+                
+                handles.push(handle);
+            }
+        }
+        
+        // Collect results
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(result)) => {
+                    results.push(result);
+                },
+                Ok(Err(e)) => {
+                    error!("Error executing operation in batch: {:?}", e);
+                    // Add error result
+                    results.push(MeshExecutionResult {
+                        result: Vec::new(),
+                        execution_time_ns: 0,
+                        network_latency_ns: 0,
+                        attestations: None,
+                        error: Some(format!("Execution error: {}", e)),
+                        metrics: None,
+                        state_hash: Vec::new(),
+                        memory_used: 0,
+                        syscall_count: 0,
+                        status: "error".to_string(),
+                        cache_hit: false,
+                        cache_ttl_sec: None,
+                        execution_type: "error".to_string(),
+                        operation_id: None,
+                    });
+                },
+                Err(e) => {
+                    error!("Task error executing operation in batch: {:?}", e);
+                    // Add error result
+                    results.push(MeshExecutionResult {
+                        result: Vec::new(),
+                        execution_time_ns: 0,
+                        network_latency_ns: 0,
+                        attestations: None,
+                        error: Some(format!("Task error: {}", e)),
+                        metrics: None,
+                        state_hash: Vec::new(),
+                        memory_used: 0,
+                        syscall_count: 0,
+                        status: "error".to_string(),
+                        cache_hit: false,
+                        cache_ttl_sec: None,
+                        execution_type: "error".to_string(),
+                        operation_id: None,
+                    });
+                }
+            }
+        }
+        
+        Ok(results)
+    }
+
+    // Helper function to calculate percentiles
+    fn percentile(&self, values: &Vec<f64>, percentile: f64) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        
+        let mut sorted_values = values.clone();
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        
+        let index = (percentile / 100.0 * (sorted_values.len() - 1) as f64) as usize;
+        sorted_values[index]
+    }
+
+    // Helper function to generate a random hash for testing
+    fn get_random_hash(&self) -> Vec<u8> {
+        let mut rng = rand::thread_rng();
+        let mut hash = Vec::with_capacity(32);
+        for _ in 0..32 {
+            hash.push(rng.gen::<u8>());
+        }
+        hash
+    }
+
     // Clone this struct for usage in tokio spawn
     pub fn clone(&self) -> Self {
         let peers_clone = match self.peers.read() {

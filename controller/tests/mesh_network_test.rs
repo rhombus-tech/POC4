@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tee_controller::HyperTeeController;
-use tee_controller::mesh::{MeshConfig, MeshCoordinator, TeeType, PeerInfo};
+use tee_controller::mesh::{MeshConfig, MeshCoordinator, TeeType, PeerInfo, BatchOperation};
 use tee_controller::proto::teeservice::{self, ExecutionRequest, ExecutionResult};
 use tee_controller::tee_peer::TeePeerService;
 use tee_interface::{ExecutionPayload, ExecutionParams, TeeExecutor};
@@ -152,6 +152,57 @@ impl TestTeeNode {
             ).await?;
             
             Ok(result.result)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "Mesh coordinator not initialized"))
+        }
+    }
+    
+    async fn execute_batch_via_mesh(&self, operations: Vec<(String, String, Vec<u8>, String)>) -> Result<Vec<Vec<u8>>, std::io::Error> {
+        if let Some(mesh_coordinator) = &self.mesh_coordinator {
+            // Simulate network latency for mesh communication (only once for the batch)
+            if self.simulated_network_latency_ms > 0 {
+                debug!("Simulating network latency of {}ms for batch TEE-to-TEE communication", self.simulated_network_latency_ms);
+                sleep(Duration::from_millis(self.simulated_network_latency_ms)).await;
+            }
+            
+            // Convert operations to BatchOperation format
+            let batch_operations = operations.into_iter().map(|(contract_id, function, input, target_tee)| {
+                // Prepare real input for contract execution
+                let real_input = format!("{},{},{}", function, contract_id, hex::encode(input)).into_bytes();
+                
+                // Create batch operation
+                BatchOperation {
+                    target_tee,
+                    region_id: self.region_id.clone(),
+                    tee_type: self.tee_type.to_string(),
+                    input: real_input,
+                    operation_id: Uuid::new_v4().to_string(),
+                }
+            }).collect();
+            
+            // Execute batch over the mesh
+            let result = mesh_coordinator.execute_batch(
+                batch_operations,
+                Duration::from_secs(30),
+                true,
+            ).await?;
+            
+            // Extract results from the batch
+            let results: Vec<Vec<u8>> = result.operations.into_iter()
+                .map(|op| op.result)
+                .collect();
+            
+            // Log performance metrics if available
+            if let Some(perf) = result.performance {
+                if let Some(ops_per_sec) = perf.operations_per_second {
+                    info!("Batch execution performance: {} ops/sec", ops_per_sec);
+                }
+                if let Some(p95) = perf.p95_execution_ms {
+                    info!("Batch execution p95 latency: {}ms", p95);
+                }
+            }
+            
+            Ok(results)
         } else {
             Err(std::io::Error::new(std::io::ErrorKind::Other, "Mesh coordinator not initialized"))
         }
@@ -771,7 +822,7 @@ async fn test_mesh_network_under_load() {
         let p50 = percentile(&results, 50.0);
         let p95 = percentile(&results, 95.0);
         let p99 = percentile(&results, 99.0);
-        let max = *results.last().unwrap();
+        let max = results.last().cloned().unwrap_or(0.0);
         
         println!("\nConcurrent performance metrics:");
         println!("- p50 (median): {:.2}ms", p50);
@@ -954,7 +1005,7 @@ async fn test_mesh_network_multi_pair_throughput() {
         let p50 = percentile(&results, 50.0);
         let p95 = percentile(&results, 95.0);
         let p99 = percentile(&results, 99.0);
-        let max = *results.last().unwrap();
+        let max = results.last().cloned().unwrap_or(0.0);
         
         println!("\nMulti-pair performance metrics:");
         println!("- p50 (median): {:.2}ms", p50);
@@ -1086,7 +1137,7 @@ async fn test_mesh_network_high_volume_throughput() {
         let p50 = percentile(&results, 50.0);
         let p95 = percentile(&results, 95.0);
         let p99 = percentile(&results, 99.0);
-        let max = *results.last().unwrap();
+        let max = results.last().cloned().unwrap_or(0.0);
         
         println!("\nHigh volume performance metrics:");
         println!("- p50 (median): {:.2}ms", p50);
@@ -1107,6 +1158,110 @@ async fn test_mesh_network_high_volume_throughput() {
         println!("\nAggregate Throughput: {:.2} operations/second", throughput);
         println!("Average Throughput Per Pair: {:.2} operations/second", throughput_per_pair);
         println!("Average Latency: {:.2}ms", results.iter().sum::<f64>() / results.len() as f64);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mesh_network_batch_vs_individual() {
+    let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
+    
+    // Create test harness with 5 SGX-SEV pairs
+    let mut harness = MeshTestHarness::new();
+    
+    // Start discovery service
+    harness.start_discovery_service().await.unwrap();
+    
+    // Create 5 TEE pairs in the same region
+    let region_id = "us-west-1";
+    for i in 0..5 {
+        harness.create_tee_pair(&format!("pair-{}", i), region_id, 9000 + i * 10).await.unwrap();
+    }
+    
+    // Deploy the same contract to all TEEs
+    let contract_id = "test-contract";
+    harness.deploy_contract_to_all(contract_id, KV_STORE_CONTRACT).await.unwrap();
+    
+    // Wait for mesh to stabilize
+    sleep(Duration::from_millis(500)).await;
+    
+    // Create operations: store different values in the contract
+    let num_operations = 500;
+    let mut operations = Vec::new();
+    
+    for i in 0..num_operations {
+        let key = format!("key-{}", i);
+        let value = format!("value-{}", i);
+        let input = format!("{},{}", key, value).into_bytes();
+        
+        // Determine which pair to target based on operation index
+        let pair_index = i % 5;
+        let target_type = if i % 2 == 0 { TeeType::SGX } else { TeeType::SEV };
+        let target_tee_id = format!("pair-{}-{}", pair_index, target_type.to_string().to_lowercase());
+        
+        operations.push((contract_id.to_string(), "store".to_string(), input, target_tee_id));
+    }
+    
+    // Test individual execution (baseline)
+    info!("Starting individual execution test for {} operations", num_operations);
+    let start_individual = std::time::Instant::now();
+    
+    let source_node = &harness.nodes["pair-0-sgx"];
+    
+    let mut individual_results = Vec::new();
+    for (contract_id, function, input, target_tee) in operations.clone() {
+        let result = source_node.execute_via_mesh(&contract_id, &function, &input, &target_tee).await.unwrap();
+        individual_results.push(result);
+    }
+    
+    let individual_time = start_individual.elapsed();
+    let individual_tps = num_operations as f64 / individual_time.as_secs_f64();
+    
+    info!("Individual execution completed in {:?} ({:.2} ops/sec)", 
+          individual_time, individual_tps);
+    
+    // Test batch execution
+    info!("Starting batch execution test for {} operations", num_operations);
+    let start_batch = std::time::Instant::now();
+    
+    let batch_results = source_node.execute_batch_via_mesh(operations).await.unwrap();
+    
+    let batch_time = start_batch.elapsed();
+    let batch_tps = num_operations as f64 / batch_time.as_secs_f64();
+    
+    info!("Batch execution completed in {:?} ({:.2} ops/sec)", 
+          batch_time, batch_tps);
+    
+    // Verify results match
+    assert_eq!(individual_results.len(), batch_results.len(), 
+               "Individual and batch results should have the same number of operations");
+    
+    // Calculate speedup
+    let speedup = if individual_tps > 0.0 { batch_tps / individual_tps } else { 0.0 };
+    info!("Batch execution speedup: {:.2}x", speedup);
+    
+    // Print scalability projections
+    let single_tee_pair_tps = batch_tps / 5.0; // Assuming even distribution across 5 pairs
+    
+    info!("\n======= TEE MESH NETWORK PERFORMANCE ANALYSIS =======");
+    info!("Current performance:");
+    info!("- Single TEE pair throughput: ~{:.2} TPS", single_tee_pair_tps);
+    info!("- 5 TEE pairs throughput: ~{:.2} TPS", batch_tps);
+    
+    // Project to larger deployments based on current performance
+    info!("\nProjected performance (based on linear scaling):");
+    info!("- 10 TEE pairs: ~{:.2} TPS", single_tee_pair_tps * 10.0);
+    info!("- 20 TEE pairs: ~{:.2} TPS", single_tee_pair_tps * 20.0);
+    info!("- 50 TEE pairs: ~{:.2} TPS", single_tee_pair_tps * 50.0);
+    info!("- 100 TEE pairs: ~{:.2} TPS", single_tee_pair_tps * 100.0);
+    
+    // We expect at least a 2x speedup from batching
+    assert!(speedup >= 2.0, "Batch execution should be at least 2x faster than individual execution");
+    
+    // Add info about Phase 1 optimization success
+    if single_tee_pair_tps > 1000.0 {
+        info!("\n✅ Phase 1 optimization goal exceeded: {:.2} TPS per pair", single_tee_pair_tps);
+        info!("      Original target: 20-30K TPS with multiple TEE pairs");
+        info!("      Current projection for 30 pairs: {:.2} TPS", single_tee_pair_tps * 30.0);
     }
 }
 

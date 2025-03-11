@@ -1,6 +1,6 @@
-use log::{debug, info, warn};
-use tee_interface::{TeeError, ExecutionPayload, ExecutionParams};
-use std::io::{Write, Read};
+use log::{debug, info};
+use tee_interface::{TeeError, ExecutionPayload};
+use std::io::Write;
 
 /// Helper struct for handling input parameters to contracts
 #[derive(Default)]

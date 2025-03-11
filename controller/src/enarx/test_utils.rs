@@ -2,11 +2,9 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::env;
 use std::process::Command;
-use log::{info, error, warn};
+use log::{info, error};
 use crate::enarx::{EnarxController, error::EnarxError};
-use tee_interface::{ExecutionPayload, ExecutionParams, ExecutionResult, TeeExecutor, TeeAttestation, TeeType, TeeError};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use tee_interface::{ExecutionPayload, ExecutionParams, TeeExecutor, TeeType};
 use hex;
 
 // Simple WASM program that adds two integers
