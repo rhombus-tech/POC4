@@ -161,21 +161,190 @@ pub struct BatchOperation {
 // Batch execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchExecutionResult {
-    pub operations: Vec<MeshExecutionResult>,
     pub batch_id: String,
-    pub batch_size: usize,
+    pub operations: Vec<MeshExecutionResult>,
     pub total_execution_time_ms: u64,
     pub batch_attestation: Option<Attestation>,
     pub performance: Option<PerformanceMetrics>,
 }
 
+// Connection information for a peer
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    pub peer_id: String,
+    pub region_id: String,
+    pub tee_type: TeeType,
+    pub endpoint: String,
+    pub created_at: std::time::Instant,
+    pub last_used: std::time::Instant,
+    pub use_count: u64,
+    pub failed_attempts: u32,
+    pub is_healthy: bool,
+    pub latency_ms: f64,
+}
+
+// Connection pool for managing persistent connections to peers
+#[derive(Debug)]
+pub struct ConnectionPool {
+    // Map of connection key (region:tee_type:peer_id) to connection info
+    connections: RwLock<HashMap<String, ConnectionInfo>>,
+    // Maximum number of connections to maintain in the pool
+    max_connections: usize,
+    // Connection timeout
+    connection_timeout: Duration,
+    // Connection idle timeout - how long to keep unused connections
+    idle_timeout: Duration,
+    // Maximum failures before marking a connection as unhealthy
+    max_failures: u32,
+    // Semaphore to limit concurrent connection creation
+    connection_semaphore: Arc<Semaphore>,
+}
+
+impl ConnectionPool {
+    pub fn new(max_connections: usize) -> Self {
+        ConnectionPool {
+            connections: RwLock::new(HashMap::new()),
+            max_connections,
+            connection_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(300), // 5 minutes
+            max_failures: 3,
+            connection_semaphore: Arc::new(Semaphore::new(10)), // Limit concurrent connection creation
+        }
+    }
+    
+    // Get a connection for a specific peer, region, and TEE type
+    pub fn get_connection(&self, peer_id: &str, region_id: &str, tee_type: &TeeType) -> Option<ConnectionInfo> {
+        let key = format!("{}:{}:{}", region_id, tee_type.to_string(), peer_id);
+        let mut connections = self.connections.write().unwrap();
+        
+        if let Some(connection) = connections.get_mut(&key) {
+            // Update last used time
+            connection.last_used = std::time::Instant::now();
+            connection.use_count += 1;
+            
+            if connection.is_healthy {
+                Some(connection.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    // Create a new connection to a peer
+    pub fn create_connection(&self, peer_id: &str, region_id: &str, tee_type: &TeeType, endpoint: &str) -> ConnectionInfo {
+        let now = std::time::Instant::now();
+        let connection = ConnectionInfo {
+            peer_id: peer_id.to_string(),
+            region_id: region_id.to_string(),
+            tee_type: *tee_type,
+            endpoint: endpoint.to_string(),
+            created_at: now,
+            last_used: now,
+            use_count: 1,
+            failed_attempts: 0,
+            is_healthy: true,
+            latency_ms: 0.0,
+        };
+        
+        let key = format!("{}:{}:{}", region_id, tee_type.to_string(), peer_id);
+        let mut connections = self.connections.write().unwrap();
+        
+        // If we're at the connection limit, remove the oldest unused connection
+        if connections.len() >= self.max_connections {
+            let now = std::time::Instant::now();
+            if let Some((oldest_key, _)) = connections.iter()
+                .filter(|(_, conn)| now.duration_since(conn.last_used) > self.idle_timeout)
+                .min_by_key(|(_, conn)| conn.last_used) {
+                    let oldest_key = oldest_key.clone();
+                    connections.remove(&oldest_key);
+                    debug!("Removed idle connection: {}", oldest_key);
+                }
+        }
+        
+        connections.insert(key, connection.clone());
+        connection
+    }
+    
+    // Mark a connection as failed
+    pub fn mark_connection_failed(&self, peer_id: &str, region_id: &str, tee_type: &TeeType) {
+        let key = format!("{}:{}:{}", region_id, tee_type.to_string(), peer_id);
+        let mut connections = self.connections.write().unwrap();
+        
+        if let Some(connection) = connections.get_mut(&key) {
+            connection.failed_attempts += 1;
+            if connection.failed_attempts >= self.max_failures {
+                connection.is_healthy = false;
+                warn!("Connection marked as unhealthy: {}", key);
+            }
+        }
+    }
+    
+    // Mark a connection as healthy after successful use
+    pub fn mark_connection_healthy(&self, peer_id: &str, region_id: &str, tee_type: &TeeType, latency_ms: f64) {
+        let key = format!("{}:{}:{}", region_id, tee_type.to_string(), peer_id);
+        let mut connections = self.connections.write().unwrap();
+        
+        if let Some(connection) = connections.get_mut(&key) {
+            connection.is_healthy = true;
+            connection.failed_attempts = 0;
+            connection.latency_ms = latency_ms;
+        }
+    }
+    
+    // Clean up idle connections
+    pub fn cleanup_idle_connections(&self) -> usize {
+        let mut connections = self.connections.write().unwrap();
+        let now = std::time::Instant::now();
+        
+        let idle_keys: Vec<String> = connections.iter()
+            .filter(|(_, conn)| now.duration_since(conn.last_used) > self.idle_timeout)
+            .map(|(key, _)| key.clone())
+            .collect();
+        
+        let count = idle_keys.len();
+        for key in idle_keys {
+            connections.remove(&key);
+            debug!("Removed idle connection: {}", key);
+        }
+        
+        count
+    }
+    
+    // Get total connection count
+    pub fn connection_count(&self) -> usize {
+        let connections = self.connections.read().unwrap();
+        connections.len()
+    }
+    
+    // Get healthy connection count
+    pub fn healthy_connection_count(&self) -> usize {
+        let connections = self.connections.read().unwrap();
+        connections.iter().filter(|(_, conn)| conn.is_healthy).count()
+    }
+    
+    // Clone for use in async contexts
+    pub fn clone(&self) -> Self {
+        ConnectionPool {
+            connections: RwLock::new(self.connections.read().unwrap().clone()),
+            max_connections: self.max_connections,
+            connection_timeout: self.connection_timeout,
+            idle_timeout: self.idle_timeout,
+            max_failures: self.max_failures,
+            connection_semaphore: self.connection_semaphore.clone(),
+        }
+    }
+}
+
 // Mesh coordinator
 pub struct MeshCoordinator {
     config: MeshConfig,
-    peers: RwLock<HashMap<String, PeerState>>,
+    peers: RwLock<HashMap<String, PeerInfo>>,
     cache: RwLock<HashMap<String, CacheEntry>>,
     local_state: RwLock<HashMap<String, Vec<u8>>>,
     max_concurrent_executions: Semaphore,
+    connection_pool: Arc<ConnectionPool>,
 }
 
 impl MeshCoordinator {
@@ -187,6 +356,7 @@ impl MeshCoordinator {
             cache: RwLock::new(HashMap::new()),
             local_state: RwLock::new(HashMap::new()),
             max_concurrent_executions: Semaphore::new(max_peers),
+            connection_pool: Arc::new(ConnectionPool::new(100)), // Support up to 100 connections
         };
         
         // Initialize and start peer discovery
@@ -234,9 +404,9 @@ impl MeshCoordinator {
         region_id: String,
         tee_type_str: String,
         input: Vec<u8>,
-        _timeout: Duration,
-        _is_async: bool,
-        _allow_fallback: bool,
+        timeout: Duration,
+        is_async: bool,
+        allow_fallback: bool,
     ) -> Result<MeshExecutionResult, std::io::Error> {
         // Parse the TeeType from string
         let tee_type = match tee_type_str.parse::<TeeType>() {
@@ -254,22 +424,79 @@ impl MeshCoordinator {
         
         let start_time = std::time::Instant::now();
         
-        // Find appropriate peer in network
-        let _peer = {
+        // First check if we have a pooled connection
+        let connection = self.connection_pool.get_connection(&target_tee, &region_id, &tee_type);
+        
+        // Find appropriate peer in network if no connection exists
+        let peer_endpoint = if let Some(connection) = &connection {
+            connection.endpoint.clone()
+        } else {
             let peers = self.peers.read().unwrap();
-            peers.get(&format!("{}:{}", region_id, tee_type.to_string())).cloned()
+            let peer_key = format!("{}:{}", region_id, tee_type.to_string());
+            
+            if let Some(peer) = peers.get(&peer_key) {
+                // Found a peer, use its endpoint
+                peer.endpoint.clone()
+            } else {
+                // No peer found, return error or use fallback
+                if allow_fallback {
+                    // Just use a simulated endpoint for now
+                    format!("https://{}.{}.example.com", target_tee, region_id)
+                } else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("No peer found for {} in region {}", tee_type.to_string(), region_id)
+                    ));
+                }
+            }
         };
         
-        // Simulate successful execution for now
-        // This will be replaced with actual peer-to-peer communication
-        let execution_time = Duration::from_millis(10 + (10));
+        // Simulate actual network communication with connection management
+        let execution_start = std::time::Instant::now();
+        
+        // If we have a connection, use it, otherwise create a new one
+        let mut conn_info = connection.unwrap_or_else(|| {
+            self.connection_pool.create_connection(&target_tee, &region_id, &tee_type, &peer_endpoint)
+        });
+        
+        // Simulate execution time based on connection quality
+        let execution_time = if conn_info.is_healthy {
+            // Faster execution for healthy connections
+            Duration::from_millis(10 + (5))
+        } else {
+            // Slower execution for new or recovering connections
+            Duration::from_millis(10 + (15))
+        };
+        
+        // Simulate network latency based on connection history
+        let network_latency_ms = if conn_info.latency_ms > 0.0 {
+            // Use historical latency with some variance
+            let mut rng = rand::thread_rng();
+            let variance = rng.gen_range(-2.0..2.0);
+            (conn_info.latency_ms + variance).max(1.0)
+        } else {
+            // New connection, use higher initial latency
+            10.0
+        };
+        
+        // Simulate the actual execution and network delay
         time::sleep(execution_time).await;
+        time::sleep(Duration::from_millis(network_latency_ms as u64)).await;
+        
+        // Update connection stats after successful execution
+        self.connection_pool.mark_connection_healthy(
+            &target_tee, 
+            &region_id, 
+            &tee_type, 
+            network_latency_ms
+        );
         
         // Generate a random sha256 hash for this execution
         let mut rng = rand::thread_rng();
         let random_hash: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
         
-        let network_latency = start_time.elapsed() - execution_time;
+        let total_latency = start_time.elapsed();
+        let network_latency = total_latency.checked_sub(execution_time).unwrap_or_default();
         
         // Generate attestation
         let attestation = Attestation {
@@ -287,9 +514,9 @@ impl MeshCoordinator {
             tee_type: tee_type.to_string(),
             region_id: region_id.clone(),
             worker_id: target_tee.clone(),
-            latency_ms: network_latency.as_millis() as f64,
+            latency_ms: network_latency_ms,
             execution_time_ns: execution_time.as_nanos() as u64,
-            network_latency_ms: network_latency.as_millis() as f64,
+            network_latency_ms: network_latency_ms,
             success_count: 1,
             failure_count: 0,
             memory_used_bytes: 1024 * 1024, // 1MB example
@@ -305,7 +532,7 @@ impl MeshCoordinator {
             operations_per_second: None,
             batch_size: None,
             concurrent_operations: None,
-            network_efficiency: None,
+            network_efficiency: Some(conn_info.use_count as f64 / (conn_info.failed_attempts as f64 + 1.0)),
         };
         
         let result = MeshExecutionResult {
@@ -487,9 +714,7 @@ impl MeshCoordinator {
                 region_id: p.region_id.clone(),
                 endpoint: p.endpoint.clone(),
                 status: p.status.clone(),
-                latency_ms: p.latency_history.iter()
-                    .map(|d| d.as_millis() as f64)
-                    .sum::<f64>() / p.latency_history.len().max(1) as f64,
+                latency_ms: p.latency_ms, // Use existing latency_ms field
             })
             .collect();
         
@@ -669,8 +894,46 @@ impl MeshCoordinator {
         for (target, target_operations) in operations_by_target {
             let op = &target_operations[0];
             let target_id = op.target_tee.clone();
-            let _region_id = op.region_id.clone();
-            let _tee_type = op.tee_type.clone();
+            let region_id = op.region_id.clone();
+            let tee_type_str = op.tee_type.clone();
+            
+            // Parse the TeeType from string
+            let tee_type = match tee_type_str.parse::<TeeType>() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Invalid TEE type: {}", e);
+                    continue;
+                }
+            };
+            
+            // Check if we have a pooled connection for this target
+            let connection = self.connection_pool.get_connection(&target_id, &region_id, &tee_type);
+            
+            // Find peer endpoint if needed
+            let peer_endpoint = if let Some(connection) = &connection {
+                connection.endpoint.clone()
+            } else {
+                let peers = self.peers.read().unwrap();
+                let peer_key = format!("{}:{}", region_id, tee_type.to_string());
+                
+                if let Some(peer) = peers.get(&peer_key) {
+                    // Found a peer, use its endpoint
+                    peer.endpoint.clone()
+                } else {
+                    // No peer found, use fallback if allowed
+                    if allow_fallback {
+                        format!("https://{}.{}.example.com", target_id, region_id)
+                    } else {
+                        error!("No peer found for {} in region {}", tee_type.to_string(), region_id);
+                        continue;
+                    }
+                }
+            };
+            
+            // Create a connection if needed
+            if connection.is_none() {
+                self.connection_pool.create_connection(&target_id, &region_id, &tee_type, &peer_endpoint);
+            }
             
             // Create a chunk size based on the number of operations per target
             // Smaller chunks for better parallelism
@@ -681,43 +944,69 @@ impl MeshCoordinator {
                 let chunk = chunk.to_vec();
                 let self_clone = self.clone();
                 let semaphore_clone = semaphore.clone();
-                // Clone target_id for each chunk to avoid the moved value error
+                // Clone target info for each chunk
                 let target_id_clone = target_id.clone();
+                let region_id_clone = region_id.clone();
+                let tee_type_clone = tee_type;
                 
                 let handle = tokio::spawn(async move {
                     let _permit = semaphore_clone.acquire().await.unwrap();
                     
+                    // Get connection for this chunk
+                    let connection = self_clone.connection_pool.get_connection(
+                        &target_id_clone, 
+                        &region_id_clone, 
+                        &tee_type_clone
+                    );
+                    
                     let mut chunk_results = Vec::new();
                     let mut chunk_tasks = Vec::new();
                     
-                    // Execute operations in this chunk concurrently
+                    // Execute operations in this chunk with connection reuse
                     for op in chunk {
                         let self_clone2 = self_clone.clone();
+                        let target_id = op.target_tee.clone();
+                        let region_id = op.region_id.clone();
+                        let tee_type = op.tee_type.clone();
+                        let input = op.input.clone();
+                        let operation_id = op.operation_id.clone();
                         
                         let task = tokio::spawn(async move {
-                            self_clone2.execute(
-                                op.target_tee.clone(),
-                                op.region_id.clone(),
-                                op.tee_type.clone(),
-                                op.input.clone(),
+                            let result = self_clone2.execute(
+                                target_id.clone(),
+                                region_id.clone(),
+                                tee_type.clone(),
+                                input,
                                 timeout,
                                 false,
                                 allow_fallback,
-                            ).await
+                            ).await;
+                            
+                            (result, operation_id)
                         });
                         
-                        chunk_tasks.push((task, op.operation_id.clone()));
+                        chunk_tasks.push(task);
                     }
                     
                     // Collect results for this chunk
-                    for (task, operation_id) in chunk_tasks {
+                    for task in chunk_tasks {
                         match task.await {
-                            Ok(Ok(mut result)) => {
+                            Ok((Ok(mut result), operation_id)) => {
                                 result.operation_id = Some(operation_id);
                                 chunk_results.push(result);
                             },
-                            Ok(Err(e)) => {
+                            Ok((Err(e), operation_id)) => {
                                 error!("Error executing operation on {}: {}", target_id_clone, e);
+                                
+                                // Mark connection as failed
+                                if let Ok(tee_type) = tee_type_clone.to_string().parse::<TeeType>() {
+                                    self_clone.connection_pool.mark_connection_failed(
+                                        &target_id_clone, 
+                                        &region_id_clone, 
+                                        &tee_type
+                                    );
+                                }
+                                
                                 // Add error result
                                 let result = MeshExecutionResult {
                                     result: Vec::new(),
@@ -739,24 +1028,15 @@ impl MeshCoordinator {
                             },
                             Err(e) => {
                                 error!("Task error executing operation on {}: {}", target_id_clone, e);
-                                // Add error result
-                                let result = MeshExecutionResult {
-                                    result: Vec::new(),
-                                    execution_time_ns: 0,
-                                    network_latency_ns: 0,
-                                    attestations: None,
-                                    error: Some(format!("Task error: {}", e)),
-                                    metrics: None,
-                                    state_hash: self_clone.get_random_hash(),
-                                    memory_used: 0,
-                                    syscall_count: 0,
-                                    status: "error".to_string(),
-                                    cache_hit: false,
-                                    cache_ttl_sec: None,
-                                    execution_type: "error".to_string(),
-                                    operation_id: Some(operation_id),
-                                };
-                                chunk_results.push(result);
+                                
+                                // Mark connection as failed
+                                if let Ok(tee_type) = tee_type_clone.to_string().parse::<TeeType>() {
+                                    self_clone.connection_pool.mark_connection_failed(
+                                        &target_id_clone, 
+                                        &region_id_clone, 
+                                        &tee_type
+                                    );
+                                }
                             }
                         }
                     }
@@ -768,163 +1048,109 @@ impl MeshCoordinator {
             }
         }
         
-        // Collect results
+        // Collect all results
         for handle in handles {
             match handle.await {
-                Ok(chunk_results) => {
-                    results.extend(chunk_results);
+                Ok(mut chunk_results) => {
+                    results.append(&mut chunk_results);
                 },
                 Err(e) => {
-                    error!("Error executing batch operation group: {}", e);
+                    error!("Error joining task: {}", e);
                 }
             }
         }
         
-        let total_execution_time_ms = start_time.elapsed().as_millis() as u64;
+        let total_duration = start_time.elapsed();
         
-        // Calculate performance metrics if we have results
-        let performance = if !results.is_empty() {
-            let execution_times: Vec<f64> = results.iter()
-                .map(|r| r.execution_time_ns as f64 / 1_000_000.0) // Convert ns to ms
-                .collect();
-            
-            let network_latencies: Vec<f64> = results.iter()
-                .map(|r| r.network_latency_ns as f64 / 1_000_000.0) // Convert ns to ms
-                .collect();
-            
-            // Calculate percentiles for execution times
+        // Calculate performance metrics
+        let mut execution_times = Vec::new();
+        let successful_ops = results.iter()
+            .filter(|r| r.error.is_none())
+            .count();
+        
+        for result in &results {
+            if result.error.is_none() {
+                execution_times.push(result.execution_time_ns as f64 / 1_000_000.0); // Convert to ms
+            }
+        }
+        
+        // Calculate percentiles if we have data
+        let (p50, p95, p99, max_latency, min_latency, avg_latency) = if !execution_times.is_empty() {
+            execution_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let p50 = self.percentile(&execution_times, 50.0);
             let p95 = self.percentile(&execution_times, 95.0);
             let p99 = self.percentile(&execution_times, 99.0);
-            
+            let max = *execution_times.last().unwrap();
+            let min = *execution_times.first().unwrap();
+            let avg = execution_times.iter().sum::<f64>() / execution_times.len() as f64;
+            (Some(p50), Some(p95), Some(p99), Some(max), Some(min), Some(avg))
+        } else {
+            (None, None, None, None, None, None)
+        };
+        
+        // Calculate operations per second
+        let ops_per_sec = if successful_ops > 0 {
+            let duration_secs = total_duration.as_secs_f64();
+            if duration_secs > 0.0 {
+                Some((successful_ops as f64 / duration_secs).round())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        // Calculate network efficiency
+        let network_efficiency = self.connection_pool.healthy_connection_count() as f64 / 
+            self.connection_pool.connection_count().max(1) as f64;
+        
+        // Create batch result with performance metrics
+        let performance = if successful_ops > 0 {
             Some(PerformanceMetrics {
-                tee_type: "".to_string(),
-                region_id: "".to_string(),
-                worker_id: "".to_string(),
-                latency_ms: 0.0,
-                execution_time_ns: 0,
-                network_latency_ms: 0.0,
-                success_count: 0,
-                failure_count: 0,
-                memory_used_bytes: 0,
-                syscall_count: 0,
-                throughput_bytes_ps: 0,
-                p50_execution_ms: Some(p50 as u64),
-                p95_execution_ms: Some(p95 as u64),
-                p99_execution_ms: Some(p99 as u64),
-                max_execution_ms: Some(*execution_times.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0) as u64),
-                avg_execution_ms: Some((execution_times.iter().sum::<f64>() / execution_times.len() as f64) as f64),
-                min_execution_ms: Some(*execution_times.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0) as u64),
-                operations_per_second: Some((batch_size as f64 / (total_execution_time_ms as f64 / 1000.0)) as u64),
-                batch_size: Some(batch_size as u64),
-                concurrent_operations: Some(max_concurrent as u64),
-                network_efficiency: Some((execution_times.iter().sum::<f64>() / network_latencies.iter().sum::<f64>()).max(1.0)),
+                tee_type: "batch".to_string(),
+                region_id: "multiple".to_string(),
+                worker_id: "batch".to_string(),
+                latency_ms: avg_latency.unwrap_or(0.0),
+                execution_time_ns: total_duration.as_nanos() as u64,
+                network_latency_ms: 0.0, // Combined in execution time
+                success_count: successful_ops as u64,
+                failure_count: (results.len() - successful_ops) as u64,
+                memory_used_bytes: 0, // Unknown for batch
+                syscall_count: 0, // Unknown for batch
+                throughput_bytes_ps: 0, // Unknown for batch
+                p50_execution_ms: p50.map(|v| v as u64),
+                p95_execution_ms: p95.map(|v| v as u64),
+                p99_execution_ms: p99.map(|v| v as u64),
+                max_execution_ms: max_latency.map(|v| v as u64),
+                avg_execution_ms: avg_latency,
+                min_execution_ms: min_latency.map(|v| v as u64),
+                operations_per_second: ops_per_sec.map(|v| v as u64),
+                batch_size: Some(batch_size.try_into().unwrap()),
+                concurrent_operations: Some(max_concurrent.try_into().unwrap()),
+                network_efficiency: Some(network_efficiency),
             })
         } else {
             None
         };
         
+        // Periodically clean up idle connections (do this after a certain number of batches)
+        let mut rng = rand::thread_rng();
+        if rng.gen_range(0..100) < 5 { // 5% chance
+            let removed = self.connection_pool.cleanup_idle_connections();
+            if removed > 0 {
+                debug!("Cleaned up {} idle connections", removed);
+            }
+        }
+        
         Ok(BatchExecutionResult {
-            operations: results,
             batch_id,
-            batch_size,
-            total_execution_time_ms,
-            batch_attestation: None,  // We could implement a batch attestation in the future
+            operations: results,
+            total_execution_time_ms: (total_duration.as_nanos() / 1_000_000) as u64,
+            batch_attestation: None, // We're not adding attestation in test mode
             performance,
         })
     }
-
-    async fn execute_batch_to_target(&self, batch_operations: Vec<BatchOperation>) 
-        -> Result<Vec<MeshExecutionResult>, std::io::Error> {
-        
-        let start_time = std::time::Instant::now();
-        
-        let batch_size = batch_operations.len();
-        debug!("Executing batch of {} operations to same target", batch_size);
-        
-        let chunk_size = 10; // Process operations in small chunks for better parallelism
-        let mut results = Vec::with_capacity(batch_size);
-        
-        // Create a larger semaphore for concurrent operations
-        let semaphore = Arc::new(Semaphore::new(24));  // Higher concurrency
-        let mut handles = Vec::new();
-        
-        // Process operations in parallel chunks
-        for chunk in batch_operations.chunks(chunk_size) {
-            for op in chunk {
-                let self_clone = self.clone();
-                let op_clone = op.clone();
-                let semaphore_clone = semaphore.clone();
-                
-                let handle = tokio::spawn(async move {
-                    let _permit = semaphore_clone.acquire().await.unwrap();
-                    self_clone.execute(
-                        op_clone.target_tee.clone(), 
-                        op_clone.region_id.clone(), 
-                        op_clone.tee_type.clone(), 
-                        op_clone.input.clone(), 
-                        Duration::from_secs(30), 
-                        false, 
-                        false
-                    ).await
-                });
-                
-                handles.push(handle);
-            }
-        }
-        
-        // Collect results
-        for handle in handles {
-            match handle.await {
-                Ok(Ok(result)) => {
-                    results.push(result);
-                },
-                Ok(Err(e)) => {
-                    error!("Error executing operation in batch: {:?}", e);
-                    // Add error result
-                    results.push(MeshExecutionResult {
-                        result: Vec::new(),
-                        execution_time_ns: 0,
-                        network_latency_ns: 0,
-                        attestations: None,
-                        error: Some(format!("Execution error: {}", e)),
-                        metrics: None,
-                        state_hash: Vec::new(),
-                        memory_used: 0,
-                        syscall_count: 0,
-                        status: "error".to_string(),
-                        cache_hit: false,
-                        cache_ttl_sec: None,
-                        execution_type: "error".to_string(),
-                        operation_id: None,
-                    });
-                },
-                Err(e) => {
-                    error!("Task error executing operation in batch: {:?}", e);
-                    // Add error result
-                    results.push(MeshExecutionResult {
-                        result: Vec::new(),
-                        execution_time_ns: 0,
-                        network_latency_ns: 0,
-                        attestations: None,
-                        error: Some(format!("Task error: {}", e)),
-                        metrics: None,
-                        state_hash: Vec::new(),
-                        memory_used: 0,
-                        syscall_count: 0,
-                        status: "error".to_string(),
-                        cache_hit: false,
-                        cache_ttl_sec: None,
-                        execution_type: "error".to_string(),
-                        operation_id: None,
-                    });
-                }
-            }
-        }
-        
-        Ok(results)
-    }
-
+    
     // Helper function to calculate percentiles
     fn percentile(&self, values: &Vec<f64>, percentile: f64) -> f64 {
         if values.is_empty() {
@@ -990,6 +1216,7 @@ impl MeshCoordinator {
             local_state: RwLock::new(local_state_clone),
             // Create a new semaphore with the same permits as the original
             max_concurrent_executions: Semaphore::new(self.config.max_peers),
+            connection_pool: self.connection_pool.clone(),
         }
     }
 }

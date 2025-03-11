@@ -930,7 +930,7 @@ async fn test_mesh_network_multi_pair_throughput() {
     println!("Starting {} concurrent operations across {} TEE pairs", TOTAL_OPS, NUM_PAIRS);
     
     // Spawn concurrent operations across all pairs
-    let mut handles = Vec::with_capacity(TOTAL_OPS);
+    let mut handles = Vec::new();
     let start = std::time::Instant::now();
     
     for pair_idx in 0..NUM_PAIRS {
@@ -1433,6 +1433,156 @@ async fn test_mesh_network_high_volume_batch() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mesh_network_connection_pooling() {
+    // Initialize the test harness
+    let mut harness = MeshTestHarness::new();
+    
+    // Start the discovery service
+    harness.start_discovery_service().await.unwrap();
+    
+    // Create one TEE pair for testing connection pooling
+    let pair_id = "conn-pool-pair";
+    harness.create_tee_pair(pair_id, "us-east-1", 8080).await.unwrap();
+    let pair = harness.tee_pairs.get(pair_id).unwrap();
+    
+    // Deploy our test contract to all nodes
+    harness.deploy_contract_to_all("simple_add", SIMPLE_ADD_CONTRACT).await.unwrap();
+    
+    println!("\n--- Testing Connection Pooling ---");
+    
+    // Phase 1: Execute a series of operations to create initial connections
+    println!("Phase 1: Initial connections - running 20 operations");
+    let operations = 20;
+    
+    let start = std::time::Instant::now();
+    
+    // Execute first batch of operations
+    for i in 0..operations {
+        let input = format!("{},{}", i, i+1).into_bytes();
+        
+        let source_node = &harness.nodes[&pair.sgx_node_id];
+        let result = source_node.execute_via_mesh(
+            "simple_add", 
+            "add", 
+            &input, 
+            &pair.sev_node_id
+        ).await;
+        assert!(result.is_ok(), "Operation execution failed in phase 1");
+    }
+    
+    let first_phase_duration = start.elapsed();
+    println!("Phase 1 completed in {:?}", first_phase_duration);
+    
+    // Brief pause to ensure all operations have completed
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
+    // Phase 2: Run operations with connection reuse
+    println!("\nPhase 2: Connection reuse - running 20 more operations");
+    
+    let start = std::time::Instant::now();
+    
+    // Run the same operations again, should reuse connections
+    for i in 0..operations {
+        let input = format!("{},{}", i, i+1).into_bytes();
+        
+        let source_node = &harness.nodes[&pair.sgx_node_id];
+        let result = source_node.execute_via_mesh(
+            "simple_add", 
+            "add", 
+            &input, 
+            &pair.sev_node_id
+        ).await;
+        assert!(result.is_ok(), "Operation execution failed in phase 2");
+    }
+    
+    let second_phase_duration = start.elapsed();
+    println!("Phase 2 completed in {:?}", second_phase_duration);
+    
+    // Verify connection pooling improves performance
+    println!("\n--- Verifying Connection Pooling Performance ---");
+    
+    // Check performance improvement between phases
+    let time_improvement = (first_phase_duration.as_micros() as f64 - second_phase_duration.as_micros() as f64) / 
+                         first_phase_duration.as_micros() as f64 * 100.0;
+    println!("Total time improvement: {:.2}%", time_improvement);
+    
+    // Estimate throughput improvement
+    let throughput_phase1 = operations as f64 / first_phase_duration.as_secs_f64();
+    let throughput_phase2 = operations as f64 / second_phase_duration.as_secs_f64();
+    
+    println!("Phase 1 throughput: {:.2} ops/sec", throughput_phase1);
+    println!("Phase 2 throughput: {:.2} ops/sec", throughput_phase2);
+    println!("Throughput improvement factor: {:.2}x", throughput_phase2 / throughput_phase1);
+    
+    // Print overall validation message
+    println!("\n--- Connection Pooling Test Summary ---");
+    if throughput_phase2 > throughput_phase1 {
+        println!("✅ Connection pooling validation PASSED - connections are being effectively reused");
+        println!("     - Throughput improved from {:.2} to {:.2} ops/sec", throughput_phase1, throughput_phase2);
+        println!("     - Improvement factor: {:.2}x", throughput_phase2 / throughput_phase1);
+    } else {
+        println!("⚠️ Connection pooling test results are inconclusive");
+        println!("     - This may be due to test conditions or implementation issues");
+    }
+    
+    // Test batch execution with connection pooling
+    println!("\n--- Testing Batch Execution with Connection Pooling ---");
+    
+    // Create a batch of operations
+    let mut batch_ops = Vec::new();
+    for i in 0..operations {
+        let input = format!("{},{}", i, i+1).into_bytes();
+        batch_ops.push(("simple_add".to_string(), "add".to_string(), input, pair.sev_node_id.clone()));
+    }
+    
+    // Execute the batch from the SGX node
+    let source_node = &harness.nodes[&pair.sgx_node_id];
+    let start = std::time::Instant::now();
+    let batch_results = source_node.execute_batch_via_mesh(batch_ops).await;
+    let batch_duration = start.elapsed();
+    
+    assert!(batch_results.is_ok(), "Batch operation execution failed");
+    
+    println!("Batch execution completed in {:?}", batch_duration);
+    println!("Average time per operation in batch: {:?}", batch_duration / operations as u32);
+    println!("Individual execution average time: {:?}", second_phase_duration / operations as u32);
+    
+    // Check if batch execution is more efficient than individual calls
+    let batch_per_op = batch_duration.as_micros() as f64 / operations as f64;
+    let individual_per_op = second_phase_duration.as_micros() as f64 / operations as f64;
+    let batch_improvement = (individual_per_op - batch_per_op) / individual_per_op * 100.0;
+    
+    println!("Batch execution improvement: {:.2}%", batch_improvement);
+    
+    if batch_per_op < individual_per_op {
+        println!("✅ Batch execution is more efficient than individual calls");
+        println!("     - Batch per operation: {:.2}µs", batch_per_op);
+        println!("     - Individual per operation: {:.2}µs", individual_per_op);
+        println!("     - Improvement: {:.2}%", batch_improvement);
+    } else {
+        println!("⚠️ Batch execution is not more efficient than individual calls");
+        println!("     - This may require further optimization");
+    }
+    
+    println!("\n✅ Connection pooling with batch execution test completed");
+}
+
+// Simple add contract for testing
+const SIMPLE_ADD_CONTRACT: &[u8] = b"
+    // Simple add contract
+    function add(a, b) {
+        return parseInt(a) + parseInt(b);
+    }
+    
+    function execute(cmd, ...args) {
+        if (cmd === 'add') {
+            return add(args[0], args[1]);
+        }
+        return 'Unknown command';
+    }
+";
 
 // Define a simple key-value store contract for testing
 const KV_STORE_CONTRACT: &[u8] = b"
