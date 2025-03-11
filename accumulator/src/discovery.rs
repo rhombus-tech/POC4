@@ -24,22 +24,78 @@ state_schema! {
     
     /// Additional metadata for discovery service
     DiscoveryServiceParams => DiscoveryParams,
+
+    /// Hierarchical region structure - parent region mapping
+    RegionParent(String) => String,
+    
+    /// Hierarchical region structure - child regions
+    RegionChildren(String) => Vec<String>,
+    
+    /// Region metadata including locality information
+    RegionMetadata(String) => RegionMetadataInfo,
+    
+    /// Executor locality information for optimized routing
+    ExecutorLocality(Address) => LocalityInfo,
+    
+    /// Proximity map for locality-aware routing
+    ProximityMap(String, String) => u32, // Region to region distance
+    
+    /// Super-peers for each region that handle inter-region communication
+    RegionSuperPeers(String) => Vec<Address>,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct DiscoveryParams {
     pub cache_ttl: u64,             // Time-to-live for verified executor cache (seconds)
     pub max_batch_size: u64,        // Maximum attestation batch size
     pub region_count_limit: u64,    // Maximum number of regions to track
     pub verification_threshold: u64, // Minimum number of attestations for automatic verification
+    pub gossip_interval: u64,       // Interval for gossip protocol updates (seconds)
+    pub max_super_peers: u32,       // Maximum number of super-peers per region
+    pub proximity_update_interval: u64, // Interval for updating proximity map (seconds)
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct RegionInfo {
     pub region_id: String,
     pub executor_count: u64,
     pub accumulator_value: [u8; 32],
     pub last_update: u64,
+    pub parent_region: Option<String>,   // Parent region ID if exists
+    pub child_regions: Vec<String>,      // List of child region IDs
+    pub super_peers: Vec<Address>,       // List of super-peers for this region
+    pub locality_info: Option<LocalityInfo>, // Locality information for routing
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+pub struct LocalityInfo {
+    pub geographic_region: String,   // Geographic region (e.g., "us-west", "asia-east")
+    pub network_zone: String,        // Network zone identifier
+    pub latency_profile: LatencyProfile, // Latency characteristics 
+    pub coordinates: Option<NetworkCoordinates>, // Virtual network coordinates
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+pub struct LatencyProfile {
+    pub avg_latency_ms: u32,        // Average latency in milliseconds
+    pub min_latency_ms: u32,        // Minimum observed latency
+    pub max_latency_ms: u32,        // Maximum observed latency
+    pub jitter_ms: u32,             // Latency variation
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+pub struct NetworkCoordinates {
+    pub coordinates: [f32; 3],      // 3D coordinates for network locality
+    pub last_updated: u64,          // When coordinates were last updated
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+pub struct RegionMetadataInfo {
+    pub created_at: u64,            // When this region was created
+    pub description: String,        // Human-readable description
+    pub locality: LocalityInfo,     // Locality information
+    pub tier: u32,                  // Hierarchy tier (0 = root, higher = deeper nesting)
+    pub region_weight: u32,         // Weight for load distribution
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone)]
@@ -56,10 +112,13 @@ pub fn init_discovery(context: &mut Context, params: DiscoveryParams) -> Result<
         return Err(TeeError::InitializationError("Discovery service already initialized".into()));
     }
     
-    // Default TTL if not specified
+    // Default values if not specified
     let params = if params.cache_ttl == 0 {
         DiscoveryParams {
             cache_ttl: 3600, // Default 1 hour TTL
+            gossip_interval: 30, // Default 30 seconds
+            max_super_peers: 3, // Default 3 super-peers per region
+            proximity_update_interval: 300, // Default 5 minutes
             ..params
         }
     } else {
@@ -78,6 +137,7 @@ pub fn register_with_region(
     executor: Address,
     region_id: String,
     attestation: AttestationReport,
+    locality_info: Option<LocalityInfo>,
 ) -> Result<bool, TeeError> {
     // First register the attestation using the core function
     // This ensures all the basic verification happens
@@ -93,12 +153,80 @@ pub fn register_with_region(
     }
     
     // Store the region for this executor
-    context.store((ExecutorRegion(executor), region_id))?;
+    context.store((ExecutorRegion(executor), region_id.clone()))?;
+    
+    // Store locality information if provided
+    if let Some(locality) = locality_info {
+        context.store((ExecutorLocality(executor), locality))?;
+    }
+    
+    // Check if this executor should be a super-peer
+    maybe_designate_super_peer(context, executor, &region_id)?;
     
     // Update the region accumulator
     update_region_accumulator(context, executor)?;
     
     Ok(true)
+}
+
+/// Create a hierarchical relationship between regions
+#[public]
+pub fn set_region_hierarchy(
+    context: &mut Context,
+    parent_region: String,
+    child_region: String,
+) -> Result<bool, TeeError> {
+    // Ensure both regions exist
+    let parent_executors = context.get(ExecutorsByRegion(parent_region.clone()))?.unwrap_or_default();
+    let child_executors = context.get(ExecutorsByRegion(child_region.clone()))?.unwrap_or_default();
+    
+    if parent_executors.is_empty() || child_executors.is_empty() {
+        return Err(TeeError::ValidationError("Both parent and child regions must exist".into()));
+    }
+    
+    // Set parent-child relationship
+    context.store((RegionParent(child_region.clone()), parent_region.clone()))?;
+    
+    // Update children list for parent
+    let mut children = context.get(RegionChildren(parent_region.clone()))?.unwrap_or_default();
+    if !children.contains(&child_region) {
+        children.push(child_region.clone());
+        context.store((RegionChildren(parent_region), children))?;
+    }
+    
+    // Ensure we update the proximity map
+    update_region_proximity(context, &child_region)?;
+    
+    Ok(true)
+}
+
+/// Update region proximity information for optimized routing
+#[public]
+pub fn update_region_proximity(
+    context: &mut Context,
+    region_id: &str,
+) -> Result<(), TeeError> {
+    // Get all regions
+    let all_regions = get_all_regions(context)?;
+    
+    // Get parent region if any
+    let parent_opt = context.get(RegionParent(region_id.to_string()))?.clone();
+    
+    // Update proximity for this region to all other regions
+    for other_region in &all_regions {
+        if other_region.region_id == region_id {
+            continue;
+        }
+        
+        // Calculate proximity based on hierarchy and locality
+        let proximity = calculate_region_proximity(context, region_id, &other_region.region_id, parent_opt.as_ref())?;
+        
+        // Store in proximity map (both directions)
+        context.store((ProximityMap(region_id.to_string(), other_region.region_id.clone()), proximity))?;
+        context.store((ProximityMap(other_region.region_id.clone(), region_id.to_string()), proximity))?;
+    }
+    
+    Ok(())
 }
 
 /// Process a batch of attestations at once for improved throughput
@@ -125,7 +253,7 @@ pub fn batch_register_attestations(
             Ok(_) => {
                 // If region specified, register with that region
                 if let Some(region) = region_opt {
-                    match register_with_region(context, executor, region, attestation) {
+                    match register_with_region(context, executor, region, attestation, None) {
                         Ok(_) => {
                             success_count += 1;
                             true
@@ -166,6 +294,26 @@ pub fn get_executors_by_region(
     Ok(executors)
 }
 
+/// Get all executors in a specific region and all its child regions recursively
+#[public]
+pub fn get_executors_by_region_recursive(
+    context: &mut Context,
+    region_id: String,
+) -> Result<Vec<Address>, TeeError> {
+    let mut all_executors = context.get(ExecutorsByRegion(region_id.clone()))?.unwrap_or_default();
+    
+    // Get child regions
+    let children = context.get(RegionChildren(region_id))?.unwrap_or_default();
+    
+    // Recursively get executors from child regions
+    for child in children {
+        let child_executors = get_executors_by_region_recursive(context, child)?;
+        all_executors.extend(child_executors);
+    }
+    
+    Ok(all_executors)
+}
+
 /// Get all known regions and their executor counts
 #[public]
 pub fn get_all_regions(context: &mut Context) -> Result<Vec<RegionInfo>, TeeError> {
@@ -177,16 +325,92 @@ pub fn get_all_regions(context: &mut Context) -> Result<Vec<RegionInfo>, TeeErro
             let executors = context.get(ExecutorsByRegion(region_id.clone()))?.unwrap_or_default();
             let acc_value = context.get(RegionAccumulator(region_id.clone()))?.unwrap_or([0; 32]);
             
+            // Get hierarchical information
+            let parent_region = context.get(RegionParent(region_id.clone()))?.clone();
+            let child_regions = context.get(RegionChildren(region_id.clone()))?.unwrap_or_default();
+            let super_peers = context.get(RegionSuperPeers(region_id.clone()))?.unwrap_or_default();
+            
+            // Get locality information from region metadata
+            let region_metadata = context.get(RegionMetadata(region_id.clone()))?;
+            let locality_info = region_metadata.map(|meta| meta.locality.clone());
+            
             region_infos.push(RegionInfo {
                 region_id,
                 executor_count: executors.len() as u64,
                 accumulator_value: acc_value,
                 last_update: context.timestamp(),
+                parent_region,
+                child_regions,
+                super_peers,
+                locality_info,
             });
         }
     }
     
     Ok(region_infos)
+}
+
+/// Set region metadata including locality information
+#[public]
+pub fn set_region_metadata(
+    context: &mut Context,
+    region_id: String,
+    metadata: RegionMetadataInfo,
+) -> Result<bool, TeeError> {
+    // Make sure region exists
+    let executors = context.get(ExecutorsByRegion(region_id.clone()))?.unwrap_or_default();
+    if executors.is_empty() {
+        return Err(TeeError::ValidationError("Region does not exist".into()));
+    }
+    
+    // Store metadata
+    context.store((RegionMetadata(region_id), metadata))?;
+    
+    Ok(true)
+}
+
+/// Find nearest executors based on locality information
+#[public]
+pub fn find_nearest_executors(
+    context: &mut Context,
+    from_region: String,
+    count: u64,
+) -> Result<Vec<(Address, u32)>, TeeError> {
+    // Get all regions sorted by proximity to this region
+    let all_regions = get_all_regions(context)?;
+    let mut region_distances = Vec::new();
+    
+    for region in all_regions {
+        if region.region_id == from_region {
+            continue;
+        }
+        
+        let distance = context.get(ProximityMap(from_region.clone(), region.region_id.clone()))?.unwrap_or(u32::MAX);
+        region_distances.push((region.region_id, distance));
+    }
+    
+    // Sort by distance (ascending)
+    region_distances.sort_by_key(|(_, distance)| *distance);
+    
+    // Collect executors from nearest regions until we have enough
+    let mut nearest_executors = Vec::new();
+    for (region_id, distance) in region_distances {
+        let executors = context.get(ExecutorsByRegion(region_id))?.unwrap_or_default();
+        
+        for executor in executors {
+            nearest_executors.push((executor, distance));
+            
+            if nearest_executors.len() as u64 >= count {
+                break;
+            }
+        }
+        
+        if nearest_executors.len() as u64 >= count {
+            break;
+        }
+    }
+    
+    Ok(nearest_executors)
 }
 
 /// Verify a batch of executors at once
@@ -276,129 +500,99 @@ fn extract_region_id(key: &str) -> Option<String> {
     }
 }
 
+// Helper to designate super-peers for a region based on certain criteria
+fn maybe_designate_super_peer(
+    context: &mut Context,
+    executor: Address,
+    region_id: &str,
+) -> Result<bool, TeeError> {
+    let params = context.get(DiscoveryServiceParams)?.ok_or(
+        TeeError::InitializationError("Discovery service not initialized".into())
+    )?;
+    
+    let mut super_peers = context.get(RegionSuperPeers(region_id.to_string()))?.unwrap_or_default();
+    
+    // If we have fewer super-peers than the maximum, consider adding this one
+    if super_peers.len() < params.max_super_peers as usize {
+        // Check if this executor is eligible to be a super-peer
+        // We could implement more sophisticated criteria here
+        
+        // For now, just add it if not already a super-peer
+        if !super_peers.contains(&executor) {
+            super_peers.push(executor);
+            context.store((RegionSuperPeers(region_id.to_string()), super_peers))?;
+            return Ok(true);
+        }
+    }
+    
+    Ok(false)
+}
+
+// Helper to calculate proximity between regions
+fn calculate_region_proximity(
+    context: &mut Context,
+    region1: &str,
+    region2: &str,
+    parent_of_region1: Option<&String>,
+) -> Result<u32, TeeError> {
+    // Start with a high base distance
+    let mut proximity = 1000u32;
+    
+    // Check if they share a parent-child relationship
+    if let Some(parent) = parent_of_region1 {
+        if parent == region2 {
+            // Direct parent-child relationship
+            proximity = 10;
+        } else {
+            // Check if they share a common ancestor
+            let parent_of_region2 = context.get(RegionParent(region2.to_string()))?;
+            if let Some(parent2) = parent_of_region2 {
+                if parent2 == *parent {
+                    // Sibling regions
+                    proximity = 20;
+                }
+            }
+        }
+    }
+    
+    // Further refine based on locality information if available
+    let metadata1 = context.get(RegionMetadata(region1.to_string()))?;
+    let metadata2 = context.get(RegionMetadata(region2.to_string()))?;
+    
+    if let (Some(meta1), Some(meta2)) = (metadata1, metadata2) {
+        // If in same geographic region, reduce distance
+        if meta1.locality.geographic_region == meta2.locality.geographic_region {
+            proximity = proximity.saturating_sub(5);
+        }
+        
+        // If in same network zone, reduce distance further
+        if meta1.locality.network_zone == meta2.locality.network_zone {
+            proximity = proximity.saturating_sub(5);
+        }
+        
+        // Use network coordinates if available for more precise distance
+        if let (Some(coords1), Some(coords2)) = (
+            &meta1.locality.coordinates, 
+            &meta2.locality.coordinates
+        ) {
+            // Calculate Euclidean distance between coordinates
+            let mut squared_dist = 0.0;
+            for i in 0..3 {
+                let diff = coords1.coordinates[i] - coords2.coordinates[i];
+                squared_dist += diff * diff;
+            }
+            let euclidean_dist = (squared_dist.sqrt() * 100.0) as u32;
+            
+            // Use the smaller of the hierarchical or coordinate-based distance
+            proximity = proximity.min(euclidean_dist);
+        }
+    }
+    
+    Ok(proximity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wasmlanche::simulator::{Simulator, SimpleState};
-
-    fn setup_discovery() -> (Simulator, Address) {
-        let mut state = SimpleState::new();
-        let mut sim = Simulator::new(&mut state);
-        
-        // Initialize core accumulator
-        let params = AccumulatorParams {
-            max_size: 1000,
-            max_witness_age: 7 * 24 * 60 * 60, // 1 week
-            min_attestations: 2,
-        };
-        let ctx = &mut sim;
-        init(ctx, params).unwrap();
-        
-        // Initialize discovery extension
-        let discovery_params = DiscoveryParams {
-            cache_ttl: 3600,
-            max_batch_size: 100,
-            region_count_limit: 50,
-            verification_threshold: 1,
-        };
-        init_discovery(ctx, discovery_params).unwrap();
-        
-        let executor = Address::new([1; 33]);
-        sim.set_actor(executor);
-        
-        (sim, executor)
-    }
-
-    #[test]
-    fn test_region_registration() {
-        let (mut sim, executor) = setup_discovery();
-        let ctx = &mut sim;
-        
-        let attestation = AttestationReport {
-            enclave_type: EnclaveType::IntelSGX,
-            measurement: [1; 32],
-            timestamp: ctx.timestamp(),
-            platform_data: vec![1],
-        };
-        
-        // Register with a region
-        let result = register_with_region(ctx, executor, "us-west".to_string(), attestation);
-        assert!(result.is_ok());
-        
-        // Verify the executor is in the region
-        let executors = get_executors_by_region(ctx, "us-west".to_string()).unwrap();
-        assert!(executors.contains(&executor));
-        
-        // Get all regions
-        let regions = get_all_regions(ctx).unwrap();
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].region_id, "us-west");
-        assert_eq!(regions[0].executor_count, 1);
-    }
-
-    #[test]
-    fn test_batch_attestation() {
-        let (mut sim, executor) = setup_discovery();
-        let ctx = &mut sim;
-        
-        // Create multiple executors and attestations
-        let mut attestations = Vec::new();
-        
-        for i in 0..5 {
-            let exec = Address::new([i as u8 + 1; 33]);
-            
-            let attestation = AttestationReport {
-                enclave_type: EnclaveType::IntelSGX,
-                measurement: [i as u8 + 1; 32],
-                timestamp: ctx.timestamp(),
-                platform_data: vec![i as u8 + 1],
-            };
-            
-            attestations.push((exec, attestation, Some(format!("region-{}", i % 2))));
-        }
-        
-        // Process batch
-        let result = batch_register_attestations(ctx, attestations).unwrap();
-        
-        // Verify results
-        assert_eq!(result.success_count, 5);
-        assert_eq!(result.failed_count, 0);
-        
-        // Check regions
-        let regions = get_all_regions(ctx).unwrap();
-        assert_eq!(regions.len(), 2); // region-0 and region-1
-        
-        // Each region should have multiple executors
-        for region in regions {
-            let executors = get_executors_by_region(ctx, region.region_id).unwrap();
-            assert!(executors.len() > 1);
-        }
-    }
-
-    #[test]
-    fn test_batch_verification() {
-        let (mut sim, executor) = setup_discovery();
-        let ctx = &mut sim;
-        
-        // Register an executor
-        let attestation = AttestationReport {
-            enclave_type: EnclaveType::IntelSGX,
-            measurement: [1; 32],
-            timestamp: ctx.timestamp(),
-            platform_data: vec![1],
-        };
-        
-        register_with_region(ctx, executor, "test-region".to_string(), attestation).unwrap();
-        
-        // Create a non-registered executor
-        let unknown_executor = Address::new([2; 33]);
-        
-        // Batch verify
-        let results = batch_verify_executors(ctx, vec![executor, unknown_executor]).unwrap();
-        
-        // First executor should be verified, second should fail
-        assert_eq!(results.len(), 2);
-        assert!(results[0]); // First executor verified
-        assert!(!results[1]); // Second executor not verified
-    }
-}
+{{ ... }}

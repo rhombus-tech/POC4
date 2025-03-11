@@ -27,7 +27,7 @@ pub use metrics::{MetricsStore, RoutingStrategy, TeePerformanceMetrics};
 pub use mesh::{MeshCoordinator, MeshConfig};
 pub use policy::{Policy, PolicyManager, SharedPolicyManager, PolicyRule, CircuitBreaker, CircuitBreakerLevel};
 pub use discovery_service::{DiscoveryService, DiscoveryServiceConfig};
-pub use discovery_integration::{EnhancedDiscoveryIntegration, EnhancedDiscoveryConfig};
+pub use discovery_integration::EnhancedDiscoveryIntegration;
 
 #[cfg(test)]
 mod policy_test;
