@@ -1,9 +1,11 @@
 use tee_controller::HyperTeeController;
-use tee_interface::{TeeExecutor, ExecutionPayload, TeeError, ExecutionResult, ExecutionStats, TeeAttestation, RegionInfo};
+use tee_interface::{TeeExecutor, ExecutionPayload, TeeError, ExecutionResult, ExecutionStats, TeeAttestation, RegionInfo, TeeType};
 use std::sync::{Arc, RwLock, atomic::{AtomicUsize, Ordering}};
 use std::collections::HashMap;
 use std::time::Duration;
 use async_trait::async_trait;
+use chrono;
+use rand;
 
 /// Mock implementation of TeeExecutor for testing
 #[derive(Clone)]
@@ -33,33 +35,61 @@ impl TeeExecutor for MockTeeExecutor {
         let op_count = self.counter.fetch_add(1, Ordering::SeqCst);
         
         // Parse input for add operation
-        let input_str = String::from_utf8_lossy(&payload.input);
+        let _input_str = String::from_utf8_lossy(&payload.input);
         
         // Create a simple mock result
         let result = ExecutionResult {
             result: format!("Mock execution result #{}", op_count).into_bytes(),
-            gas_used: 1000,
-            logs: vec![],
+            state_hash: vec![0, 1, 2, 3],
+            attestations: vec![TeeAttestation {
+                enclave_id: vec![1, 2, 3],
+                measurement: vec![4, 5, 6],
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                data: vec![7, 8, 9],
+                signature: vec![10, 11, 12],
+                region_proof: None,
+                enclave_type: TeeType::SGX,
+            }],
             stats: ExecutionStats {
-                cpu_time_us: 1000,
+                execution_time: 1000,
                 memory_used: 1024 * 1024,
                 syscall_count: 10,
-            }
+            },
+            operation_status: Some("completed".to_string()),
+            operation_id: Some(format!("op-{}", op_count)),
+            pending_operations: None,
+            timestamp: chrono::Utc::now().timestamp().to_string(),
         };
         
         Ok(result)
     }
-
-    async fn verify_attestation(&self, _attestation: &TeeAttestation) -> Result<bool, TeeError> {
-        Ok(true)
+    
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
+        Ok(vec![RegionInfo {
+            id: "test-region".to_string(),
+            worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
+            max_tasks: 100,
+        }])
     }
-
-    async fn get_region_info(&self) -> Result<RegionInfo, TeeError> {
-        Ok(RegionInfo {
-            region_id: "test-region".to_string(),
-            location: "test-location".to_string(),
-            provider: "test-provider".to_string(),
-        })
+    
+    async fn get_attestations(&self, _region_id: &str) -> Result<Vec<TeeAttestation>, TeeError> {
+        Ok(vec![TeeAttestation {
+            enclave_id: vec![1, 2, 3],
+            measurement: vec![4, 5, 6],
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            data: vec![7, 8, 9],
+            signature: vec![10, 11, 12],
+            region_proof: None,
+            enclave_type: TeeType::SGX,
+        }])
+    }
+    
+    async fn deploy_contract(&self, _bytecode: &[u8], _region_id: &str) -> Result<String, TeeError> {
+        Ok(format!("contract-{}", rand::random::<u64>()))
+    }
+    
+    async fn get_state_hash(&self, _contract_id: &str) -> Result<Vec<u8>, TeeError> {
+        Ok(vec![0, 1, 2, 3])
     }
 }
 

@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use tokio::time;
 use log::{info, warn, error, debug};
 use serde::{Serialize, Deserialize};
-use sha2::{Sha256, Digest};
+use sha2::Sha256;
 use rand::Rng;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -34,13 +34,20 @@ impl ToString for TeeType {
 
 // Implement FromStr for TeeType for string parsing
 impl std::str::FromStr for TeeType {
-    type Err = String;
-
+    type Err = std::io::Error;
+    
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_uppercase().as_str() {
-            "INTEL_SGX" => Ok(TeeType::IntelSGX),
-            "SEV" => Ok(TeeType::SEV),
-            _ => Err(format!("Unknown TEE type: {}", s)),
+        // Convert to lowercase for case-insensitive matching
+        let s_lower = s.to_lowercase();
+        match s_lower.as_str() {
+            "intelsgx" => Ok(TeeType::IntelSGX),
+            "sgx" => Ok(TeeType::IntelSGX), // Allow SGX as an alias
+            "intel_sgx" => Ok(TeeType::IntelSGX), // Allow INTEL_SGX format
+            "sev" => Ok(TeeType::SEV),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Unknown TEE type: {}", s)
+            )),
         }
     }
 }
@@ -155,6 +162,36 @@ pub struct PerformanceMetrics {
     pub batch_size: Option<u64>, 
     pub concurrent_operations: Option<u64>,
     pub network_efficiency: Option<f64>, // Ratio of execution time to network latency
+    pub custom_metrics: HashMap<String, String>,
+}
+
+impl Default for PerformanceMetrics {
+    fn default() -> Self {
+        Self {
+            tee_type: "".to_string(),
+            region_id: "".to_string(),
+            worker_id: "".to_string(),
+            latency_ms: 0.0,
+            execution_time_ns: 0,
+            network_latency_ms: 0.0,
+            success_count: 0,
+            failure_count: 0,
+            memory_used_bytes: 0,
+            syscall_count: 0,
+            throughput_bytes_ps: 0,
+            p50_execution_ms: None,
+            p95_execution_ms: None,
+            p99_execution_ms: None,
+            max_execution_ms: None,
+            avg_execution_ms: None,
+            min_execution_ms: None,
+            operations_per_second: None,
+            batch_size: None,
+            concurrent_operations: None,
+            network_efficiency: None,
+            custom_metrics: HashMap::new(),
+        }
+    }
 }
 
 // Struct to track peer status and connection info
@@ -742,8 +779,8 @@ impl MeshCoordinator {
         region_id: String,
         tee_type_str: String,
         input: Vec<u8>,
-        timeout: Duration,
-        is_async: bool,
+        _timeout: Duration,
+        _is_async: bool,
         allow_fallback: bool,
     ) -> Result<MeshExecutionResult, std::io::Error> {
         // Parse the TeeType from string
@@ -790,15 +827,15 @@ impl MeshCoordinator {
         };
         
         // Simulate actual network communication with connection management
-        let execution_start = std::time::Instant::now();
+        let _execution_start = std::time::Instant::now();
         
         // If we have a connection, use it, otherwise create a new one
-        let mut conn_info = connection.unwrap_or_else(|| {
+        let conn_info = connection.unwrap_or_else(|| {
             self.connection_pool.create_connection(&target_tee, &region_id, &tee_type, &peer_endpoint)
         });
         
         // Simulate execution time based on connection quality
-        let execution_time = if conn_info.is_healthy {
+        let _execution_time = if conn_info.is_healthy {
             // Faster execution for healthy connections
             Duration::from_millis(10 + (5))
         } else {
@@ -818,7 +855,6 @@ impl MeshCoordinator {
         };
         
         // Simulate the actual execution and network delay
-        time::sleep(execution_time).await;
         time::sleep(Duration::from_millis(network_latency_ms as u64)).await;
         
         // Update connection stats after successful execution
@@ -834,7 +870,7 @@ impl MeshCoordinator {
         let random_hash: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
         
         let total_latency = start_time.elapsed();
-        let network_latency = total_latency.checked_sub(execution_time).unwrap_or_default();
+        let network_latency = total_latency.checked_sub(Duration::from_millis(network_latency_ms as u64)).unwrap_or_default();
         
         // Generate attestation
         let attestation = Attestation {
@@ -853,14 +889,14 @@ impl MeshCoordinator {
             region_id: region_id.clone(),
             worker_id: target_tee.clone(),
             latency_ms: network_latency_ms,
-            execution_time_ns: execution_time.as_nanos() as u64,
+            execution_time_ns: network_latency.as_nanos() as u64,
             network_latency_ms: network_latency_ms,
             success_count: 1,
             failure_count: 0,
             memory_used_bytes: 1024 * 1024, // 1MB example
             syscall_count: 42,
             throughput_bytes_ps: (input.len() as u64 * 1000) / 
-                (execution_time.as_millis() as u64).max(1),
+                (network_latency.as_millis() as u64).max(1),
             p50_execution_ms: None,
             p95_execution_ms: None,
             p99_execution_ms: None,
@@ -871,11 +907,12 @@ impl MeshCoordinator {
             batch_size: None,
             concurrent_operations: None,
             network_efficiency: Some(conn_info.use_count as f64 / (conn_info.failed_attempts as f64 + 1.0)),
+            custom_metrics: HashMap::new(),
         };
         
         let result = MeshExecutionResult {
             result: input, // Echo input as a simulated result for now
-            execution_time_ns: execution_time.as_nanos() as u64,
+            execution_time_ns: network_latency.as_nanos() as u64,
             network_latency_ns: network_latency.as_nanos() as u64,
             attestations: Some(vec![attestation]),
             error: None,
@@ -959,8 +996,8 @@ impl MeshCoordinator {
         is_async: bool,
         allow_fallback: bool,
     ) -> Result<MeshExecutionResult, std::io::Error> {
-        info!("Executing paired execution: target={}, region={}, type={}, use_cache={}", 
-              target_tee, region_id, tee_type, false);
+        info!("Executing paired execution: target={}, region={}, type={}", 
+              target_tee, region_id, tee_type);
         
         // Generate cache key
         let cache_key = self.generate_cache_key(&target_tee, &region_id, &tee_type, &input);
@@ -971,23 +1008,238 @@ impl MeshCoordinator {
             return Ok(cached_result);
         }
         
-        // Execute the request
-        let mut result = self.execute(
+        // Find a complementary TEE of the other type in the same region
+        // If primary is SGX, find a SEV TEE, and vice versa
+        let complementary_tee_type = if tee_type == "IntelSGX" { "SEV" } else { "IntelSGX" };
+        let mut complementary_tee = None;
+        {
+            let peers = self.peers.read().unwrap();
+            
+            // Find a paired TEE of the complementary type in the same region
+            for (id, peer) in peers.iter() {
+                if id != &target_tee && 
+                   peer.region_id == region_id && 
+                   peer.tee_type == complementary_tee_type &&
+                   peer.status == "active" {
+                    complementary_tee = Some(id.clone());
+                    debug!("Found complementary TEE {} of type {} for primary TEE {} of type {}", 
+                           id, complementary_tee_type, target_tee, tee_type);
+                    break;
+                }
+            }
+        }
+        
+        // Start tracking execution time for metrics
+        let start_time = std::time::Instant::now();
+        
+        // Execute on primary TEE first
+        let primary_result = match self.execute(
             target_tee.clone(), 
             region_id.clone(), 
-            tee_type, 
+            tee_type.clone(), 
             input.clone(), 
-            timeout, 
+            timeout.clone(), 
             is_async, 
-            allow_fallback
-        ).await?;
+            false // Don't allow fallback for primary attempt
+        ).await {
+            Ok(result) => result,
+            Err(e) => {
+                // If primary execution fails and we have a complementary TEE, proceed with it
+                if let Some(comp_tee) = &complementary_tee {
+                    warn!("Primary TEE {} of type {} execution failed: {}. Failing over to complementary TEE {} of type {}", 
+                          target_tee, tee_type, e, comp_tee, complementary_tee_type);
+                    
+                    // Mark the connection as failed
+                    if let Ok(tee_type_enum) = tee_type.parse::<TeeType>() {
+                        self.connection_pool.mark_connection_failed(&target_tee, &region_id, &tee_type_enum);
+                    }
+                    
+                    // Execute on complementary TEE as failover
+                    let complementary_result = self.execute(
+                        comp_tee.clone(), 
+                        region_id.clone(), 
+                        complementary_tee_type.to_string(), 
+                        input.clone(), 
+                        timeout, 
+                        is_async, 
+                        allow_fallback
+                    ).await?;
+                    
+                    let mut result = complementary_result;
+                    result.execution_type = format!("paired_failover:primary={},secondary={}", tee_type, complementary_tee_type);
+                    
+                    // Store in cache with TTL
+                    self.store_in_cache(&cache_key, &result, Duration::from_secs(3600));
+                    
+                    // Attempt recovery of primary TEE (async)
+                    let _primary_tee = target_tee.clone();
+                    let _region = region_id.clone();
+                    let _tee_type_str = tee_type.clone();
+                    tokio::spawn(async move {
+                        debug!("Attempting recovery of failed primary TEE: {}", _primary_tee);
+                        // Wait before attempting recovery
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        
+                        // This is a placeholder for the actual recovery logic
+                        // In a real implementation, this would include:
+                        // - Restarting the TEE service
+                        // - Re-verifying its attestation
+                        // - Syncing its state with the complementary TEE
+                        
+                        debug!("Recovery attempt for TEE {} completed", _primary_tee);
+                    });
+                    
+                    return Ok(result);
+                } else if allow_fallback {
+                    // If no complementary TEE and fallback is allowed, attempt to find any healthy TEE
+                    warn!("Primary TEE {} execution failed and no complementary TEE available. Attempting fallback.", target_tee);
+                    return self.try_executor(
+                        "".to_string(), // Empty target means find any healthy executor
+                        region_id.clone(),
+                        tee_type.clone(),
+                        input.clone(),
+                        timeout,
+                        is_async,
+                        true
+                    ).await;
+                } else {
+                    // No fallback options, return error
+                    return Err(e);
+                }
+            }
+        };
         
-        // Mark as paired execution
-        result.execution_type = "paired".to_string();
+        // If we have a complementary TEE, execute on it as well to verify results
+        if let Some(comp_tee_id) = complementary_tee {
+            let complementary_result = match self.execute(
+                comp_tee_id.clone(), 
+                region_id.clone(), 
+                complementary_tee_type.to_string(), 
+                input.clone(), 
+                timeout.clone(), 
+                is_async, 
+                false // Don't allow fallback for verification
+            ).await {
+                Ok(result) => result,
+                Err(e) => {
+                    // If complementary execution fails, log warning but return primary result
+                    warn!("Complementary TEE {} of type {} execution failed: {}. Using primary result.", 
+                          comp_tee_id, complementary_tee_type, e);
+                    
+                    // Mark the connection as failed
+                    if let Ok(tee_type_enum) = complementary_tee_type.parse::<TeeType>() {
+                        self.connection_pool.mark_connection_failed(&comp_tee_id, &region_id, &tee_type_enum);
+                    }
+                    
+                    // Return primary result
+                    let mut result = primary_result;
+                    result.execution_type = format!("paired_primary_only:primary={},secondary_failed={}", tee_type, complementary_tee_type);
+                    
+                    // Store in cache with TTL
+                    self.store_in_cache(&cache_key, &result, Duration::from_secs(3600));
+                    
+                    // Attempt recovery of complementary TEE (async)
+                    let _comp_tee = comp_tee_id.clone();
+                    let _region = region_id.clone();
+                    let _comp_type_str = complementary_tee_type.to_string();
+                    tokio::spawn(async move {
+                        debug!("Attempting recovery of failed complementary TEE: {}", _comp_tee);
+                        // Wait before attempting recovery
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        
+                        // Placeholder for actual recovery logic
+                        debug!("Recovery attempt for TEE {} completed", _comp_tee);
+                    });
+                    
+                    return Ok(result);
+                }
+            };
+            
+            // Verify results match between primary and complementary TEEs (cross-type verification)
+            if primary_result.result != complementary_result.result {
+                error!("Results from primary TEE {} (type {}) and complementary TEE {} (type {}) do not match!", 
+                       target_tee, tee_type, comp_tee_id, complementary_tee_type);
+                
+                // This is a serious security/integrity issue - results don't match
+                // In a production environment, this could trigger additional verification
+                // or escalation to human operators
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Results from TEEs of different types do not match: {} vs {}", tee_type, complementary_tee_type)
+                ));
+            }
+            
+            // Results match, combine the attestations from both TEE types
+            let mut result = primary_result;
+            result.execution_type = format!("paired_verified:primary={},secondary={}", tee_type, complementary_tee_type);
+            
+            // Add attestations from complementary result if not already present
+            if let Some(comp_attestations) = &complementary_result.attestations {
+                if let Some(mut attestations) = result.attestations.clone() {
+                    for attestation in comp_attestations {
+                        if !attestations.contains(attestation) {
+                            attestations.push(attestation.clone());
+                        }
+                    }
+                    result.attestations = Some(attestations);
+                } else {
+                    result.attestations = Some(comp_attestations.clone());
+                }
+            }
+            
+            // Update execution time to include dual execution and verification
+            result.execution_time_ns = start_time.elapsed().as_nanos() as u64;
+            
+            // Add dual execution information to metrics
+            if result.metrics.is_none() {
+                result.metrics = Some(PerformanceMetrics::default());
+            }
+            
+            if let Some(metrics) = &mut result.metrics {
+                // Store dual execution info in metrics
+                metrics.custom_metrics.insert("dual_execution".to_string(), "true".to_string());
+                metrics.custom_metrics.insert("primary_tee_type".to_string(), tee_type.clone());
+                metrics.custom_metrics.insert("secondary_tee_type".to_string(), complementary_tee_type.to_string());
+                metrics.custom_metrics.insert("cross_type_verified".to_string(), "true".to_string());
+            }
+            
+            // Store in cache with TTL
+            self.store_in_cache(&cache_key, &result, Duration::from_secs(3600));
+            
+            // Mark both connections as healthy
+            if let Ok(primary_tee_type_enum) = tee_type.parse::<TeeType>() {
+                self.connection_pool.mark_connection_healthy(
+                    &target_tee, &region_id, &primary_tee_type_enum, result.execution_time_ns as f64 / 1_000_000.0);
+            }
+            
+            if let Ok(comp_tee_type_enum) = complementary_tee_type.parse::<TeeType>() {
+                self.connection_pool.mark_connection_healthy(
+                    &comp_tee_id, &region_id, &comp_tee_type_enum, result.execution_time_ns as f64 / 1_000_000.0);
+            }
+            
+            info!("Paired execution completed successfully with cross-verification between TEE types: {} and {}", 
+                  tee_type, complementary_tee_type);
+            return Ok(result);
+        }
+        
+        // Fallback case: No complementary TEE available, use single execution result
+        let mut result = primary_result;
+        result.execution_type = format!("paired_fallback:primary={},no_complementary_tee", tee_type);
+        
+        // Add info about fallback to single execution in metrics
+        if result.metrics.is_none() {
+            result.metrics = Some(PerformanceMetrics::default());
+        }
+        
+        if let Some(metrics) = &mut result.metrics {
+            metrics.custom_metrics.insert("dual_execution".to_string(), "false".to_string());
+            metrics.custom_metrics.insert("fallback_reason".to_string(), "no_complementary_tee".to_string());
+        }
         
         // Store in cache with TTL
         self.store_in_cache(&cache_key, &result, Duration::from_secs(3600));
         
+        warn!("Paired execution completed with fallback to single TEE (no complementary TEE available)");
         Ok(result)
     }
     
@@ -1108,7 +1360,7 @@ impl MeshCoordinator {
         // For now, simulate a successful sync
         // This will be replaced with actual TEE-to-TEE state sync
         
-        let state_data: Vec<u8> = Vec::new();
+        let _state_data: Vec<u8> = Vec::new();
         
         // Simulated result
         let result = SyncResult {
@@ -1232,7 +1484,7 @@ impl MeshCoordinator {
         let mut handles = Vec::new();
         
         // Process each target in parallel with higher concurrency
-        for (target, target_operations) in operations_by_target {
+        for (_target, target_operations) in operations_by_target {
             let op = &target_operations[0];
             let target_id = op.target_tee.clone();
             let region_id = op.region_id.clone();
@@ -1248,11 +1500,11 @@ impl MeshCoordinator {
             };
             
             // Check if we have a pooled connection for this target
-            let connection = self.connection_pool.get_connection(&target_id, &region_id, &tee_type);
+            let _connection = self.connection_pool.get_connection(&target_id, &region_id, &tee_type);
             
             // Find peer endpoint if needed
-            let peer_endpoint = if let Some(connection) = &connection {
-                connection.endpoint.clone()
+            let peer_endpoint = if let Some(_connection) = &_connection {
+                _connection.endpoint.clone()
             } else {
                 let peers = self.peers.read().unwrap();
                 let peer_key = format!("{}:{}", region_id, tee_type.to_string());
@@ -1272,7 +1524,7 @@ impl MeshCoordinator {
             };
             
             // Create a connection if needed
-            if connection.is_none() {
+            if _connection.is_none() {
                 self.connection_pool.create_connection(&target_id, &region_id, &tee_type, &peer_endpoint);
             }
             
@@ -1294,7 +1546,7 @@ impl MeshCoordinator {
                     let _permit = semaphore_clone.acquire().await.unwrap();
                     
                     // Get connection for this chunk
-                    let connection = self_clone.connection_pool.get_connection(
+                    let _connection = self_clone.connection_pool.get_connection(
                         &target_id_clone, 
                         &region_id_clone, 
                         &tee_type_clone
@@ -1469,6 +1721,7 @@ impl MeshCoordinator {
                 batch_size: Some(batch_size.try_into().unwrap()),
                 concurrent_operations: Some(max_concurrent.try_into().unwrap()),
                 network_efficiency: Some(network_efficiency),
+                custom_metrics: HashMap::new(),
             })
         } else {
             None
@@ -1533,7 +1786,7 @@ impl Clone for MeshCoordinator {
 }
 
 // Attestation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attestation {
     pub enclave_type: String,
     pub measurement: Vec<u8>,
@@ -1615,5 +1868,36 @@ impl MeshCoordinator {
         
         let hash = hasher.finalize().to_vec();
         hash
+    }
+}
+
+// Extension implementation for MeshCoordinator to add connection health management
+impl MeshCoordinator {
+    // Mark a peer connection as failed
+    pub fn mark_peer_connection_failed(&self, peer_id: &str, region_id: &str, tee_type: &str) -> Result<(), std::io::Error> {
+        let tee_type_enum = match tee_type.parse::<TeeType>() {
+            Ok(t) => t,
+            Err(_) => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid TEE type: {}", tee_type)
+            )),
+        };
+        
+        self.connection_pool.mark_connection_failed(peer_id, region_id, &tee_type_enum);
+        Ok(())
+    }
+    
+    // Mark a peer connection as healthy
+    pub fn mark_peer_connection_healthy(&self, peer_id: &str, region_id: &str, tee_type: &str, latency_ms: f64) -> Result<(), std::io::Error> {
+        let tee_type_enum = match tee_type.parse::<TeeType>() {
+            Ok(t) => t,
+            Err(_) => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid TEE type: {}", tee_type)
+            )),
+        };
+        
+        self.connection_pool.mark_connection_healthy(peer_id, region_id, &tee_type_enum, latency_ms);
+        Ok(())
     }
 }

@@ -1999,6 +1999,7 @@ impl HyperTeeController {
                                     batch_size: Some(1),
                                     concurrent_operations: Some(1),
                                     network_efficiency: Some(1.0),
+                                    custom_metrics: std::collections::HashMap::new(),
                                 }),
                                 memory_used: 0,       // Not available from coordinator
                                 syscall_count: 0,     // Not available from coordinator
