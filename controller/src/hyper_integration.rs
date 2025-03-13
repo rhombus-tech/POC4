@@ -178,11 +178,13 @@ impl HyperTeeController {
                 circuit_breaker_threshold: Duration::from_millis(500), // Default 500ms threshold
                 peer_refresh_interval: Duration::from_secs(peer_refresh_interval_sec),
                 enhanced_discovery: false, // Disable enhanced discovery by default
-                enhanced_discovery_config: None, // No enhanced discovery config by default
+                discovery_config: None, // No enhanced discovery config by default
+                accumulator_endpoint: None,
+                local_identity: Some(worker_id.clone()),
             };
             
             match MeshCoordinator::new(mesh_config).await {
-                Ok(coordinator) => Some(Arc::new(coordinator)),
+                Ok(coordinator) => Some(coordinator), 
                 Err(e) => {
                     error!("Failed to initialize mesh coordinator: {:?}", e);
                     None
@@ -2138,7 +2140,7 @@ impl HyperTeeController {
 impl HyperTeeController {
     // Initialize policy manager with default policies
     pub async fn initialize_policy_manager(&mut self) -> Result<(), TeeError> {
-        let policy_manager = Arc::new(SharedPolicyManager::new());
+        let policy_manager = SharedPolicyManager::new();
         
         // Create default policies for each region
         let regions = self.get_regions().await.unwrap_or_default();
@@ -2223,7 +2225,7 @@ impl HyperTeeController {
         }
         
         // Set the policy manager
-        self.policy_manager = Some(policy_manager);
+        self.policy_manager = Some(Arc::new(policy_manager));
         
         // Enable policy enforcement
         self.policy_enforcement_enabled = true;

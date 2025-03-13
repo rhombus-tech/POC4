@@ -1,7 +1,7 @@
 // Module for implementing mesh network functionality in the TEE controller
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::time;
 use log::{info, warn, error, debug};
 use serde::{Serialize, Deserialize};
@@ -10,12 +10,15 @@ use rand::Rng;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use reqwest::{Client as HttpClient, ClientBuilder};
+use crate::discovery_service::{LocalityInfoDto, DiscoveryRegionInfo};
+use crate::accumulator_client::{AccumulatorClientTrait, RealAccumulatorClient, MockAccumulatorClient};
+use crate::accumulator_client::{create_accumulator_client};
 
 // Define TeeType enum for mesh
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TeeType {
     /// Intel SGX
-    SGX,
+    IntelSGX,
     /// AMD SEV
     SEV,
 }
@@ -23,7 +26,7 @@ pub enum TeeType {
 impl ToString for TeeType {
     fn to_string(&self) -> String {
         match self {
-            TeeType::SGX => "SGX".to_string(),
+            TeeType::IntelSGX => "IntelSGX".to_string(),
             TeeType::SEV => "SEV".to_string(),
         }
     }
@@ -35,7 +38,7 @@ impl std::str::FromStr for TeeType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
-            "SGX" => Ok(TeeType::SGX),
+            "INTEL_SGX" => Ok(TeeType::IntelSGX),
             "SEV" => Ok(TeeType::SEV),
             _ => Err(format!("Unknown TEE type: {}", s)),
         }
@@ -54,7 +57,30 @@ pub struct MeshConfig {
     pub peer_refresh_interval: Duration,
     // Add configuration for enhanced discovery service
     pub enhanced_discovery: bool,
-    pub enhanced_discovery_config: Option<DiscoveryServiceConfig>,
+    pub discovery_config: Option<DiscoveryServiceConfig>,
+    // Add new fields for accumulator configuration
+    pub accumulator_endpoint: Option<String>,
+    pub local_identity: Option<String>,
+}
+
+impl Default for MeshConfig {
+    fn default() -> Self {
+        Self {
+            region_id: "us-west".to_string(),
+            endpoint: "https://example.com".to_string(),
+            tee_id: "tee-123".to_string(),
+            max_peers: 10,
+            discovery_interval_sec: 60,
+            discovery_endpoint: "https://discovery.example.com".to_string(),
+            circuit_breaker_threshold: Duration::from_secs(30),
+            peer_refresh_interval: Duration::from_secs(300),
+            enhanced_discovery: false,
+            discovery_config: None,
+            // Default values for new accumulator fields
+            accumulator_endpoint: None,
+            local_identity: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +165,7 @@ struct PeerState {
     region_id: String,
     endpoint: String,
     status: String,
-    last_ping: std::time::Instant,
+    last_updated: std::time::SystemTime,
     latency_history: Vec<Duration>,
     success_count: u64,
     failure_count: u64,
@@ -456,52 +482,87 @@ impl ConnectionPool {
 
 // Mesh coordinator
 pub struct MeshCoordinator {
-    config: MeshConfig,
-    peers: RwLock<HashMap<String, PeerInfo>>,
-    cache: RwLock<HashMap<String, CacheEntry>>,
-    local_state: RwLock<HashMap<String, Vec<u8>>>,
+    pub config: MeshConfig,
+    peers: Arc<RwLock<HashMap<String, PeerState>>>,
+    cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
+    local_state: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     max_concurrent_executions: Semaphore,
     connection_pool: Arc<ConnectionPool>,
+    // Add accumulator client reference
+    accumulator_client: Option<Arc<dyn AccumulatorClientTrait>>,
 }
 
 impl MeshCoordinator {
-    pub async fn new(config: MeshConfig) -> Result<Self, std::io::Error> {
-        let max_peers = config.max_peers; // Save max_peers before moving config
+    pub async fn new(config: MeshConfig) -> Result<Arc<Self>, std::io::Error> {
+        let max_peers = config.max_peers;
         
-        // Create connection pool
-        let connection_pool = if config.enhanced_discovery {
-            // Use real connections if enhanced discovery is enabled
-            Arc::new(ConnectionPool::new_with_real_connections(
-                max_peers * 2, // Support up to 2x max_peers connections
-                Duration::from_secs(30), // 30 second connection timeout
-                Duration::from_secs(300), // 5 minute idle timeout
-            ))
-        } else {
-            // Use simulated connections (for testing and backwards compatibility)
+        // Create a connection pool for peer communication
+        let connection_pool = {
+            debug!("Creating connection pool for up to {} peers", max_peers * 2);
             Arc::new(ConnectionPool::new(max_peers * 2)) // Support up to 2x max_peers connections
         };
         
-        let coordinator = MeshCoordinator {
-            config,
-            peers: RwLock::new(HashMap::new()),
-            cache: RwLock::new(HashMap::new()),
-            local_state: RwLock::new(HashMap::new()),
-            max_concurrent_executions: Semaphore::new(max_peers),
-            connection_pool,
+        // Create accumulator client
+        let accumulator_client = if config.enhanced_discovery {
+            let endpoint = config.discovery_config.as_ref()
+                .and_then(|c| c.accumulator_endpoint.clone())
+                .unwrap_or_else(|| "http://localhost:8080".to_string());
+                
+            let local_identity = config.local_identity.clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            
+            // Create a real accumulator client
+            Some(Arc::new(RealAccumulatorClient::new(&endpoint, &local_identity)) as Arc<dyn AccumulatorClientTrait>)
+        } else {
+            // Create a mock accumulator client for backward compatibility
+            Some(Arc::new(MockAccumulatorClient::new()) as Arc<dyn AccumulatorClientTrait>)
         };
         
+        let coordinator = Arc::new(MeshCoordinator {
+            config,
+            peers: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            local_state: Arc::new(RwLock::new(HashMap::new())),
+            max_concurrent_executions: Semaphore::new(max_peers),
+            connection_pool,
+            accumulator_client,
+        });
+        
         // Initialize and start peer discovery
-        coordinator.start_discovery().await?;
+        // Clone the Arc to avoid borrowing issues in the discovery task
+        let self_clone = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            // Wait a bit before starting discovery to allow other initialization to complete
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            
+            // Run the initial peer discovery
+            match self_clone.refresh_peers().await {
+                Ok(_) => debug!("Initial peer discovery completed"),
+                Err(e) => error!("Failed to run initial peer discovery: {}", e),
+            }
+            
+            // Set up recurring peer discovery
+            let mut interval = tokio::time::interval(Duration::from_secs(self_clone.config.discovery_interval_sec));
+            
+            loop {
+                interval.tick().await;
+                
+                match self_clone.refresh_peers().await {
+                    Ok(_) => debug!("Periodic peer discovery completed"),
+                    Err(e) => error!("Failed to run periodic peer discovery: {}", e),
+                }
+            }
+        });
         
         Ok(coordinator)
     }
     
-    async fn start_discovery(&self) -> Result<(), std::io::Error> {
+    async fn start_discovery(self: Arc<Self>) -> Result<(), std::io::Error> {
         info!("Initializing mesh coordinator for TEE ID: {}", self.config.tee_id);
         
         // Start periodic peer discovery
         let config_clone = self.config.clone();
-        let coordinator = Arc::new(self.clone());
+        let coordinator = self.clone();
         
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(config_clone.discovery_interval_sec));
@@ -522,8 +583,154 @@ impl MeshCoordinator {
     async fn refresh_peers(&self) -> Result<(), std::io::Error> {
         debug!("Refreshing peers for region: {}", self.config.region_id);
         
-        // In a real implementation, this would call the discovery endpoint
-        // For now, just simulate peer discovery
+        // Check if we have an accumulator client
+        if let Some(accumulator_client) = &self.accumulator_client {
+            // Retrieve peers from the accumulator client
+            match accumulator_client.get_peers_in_region(&self.config.region_id).await {
+                Ok(peer_ids) => {
+                    debug!("Found {} peers in region {}", peer_ids.len(), self.config.region_id);
+                    
+                    // Batch verify the peers using the accumulator
+                    let verification_results = match accumulator_client.batch_verify_peers(&peer_ids).await {
+                        Ok(results) => results,
+                        Err(e) => {
+                            error!("Failed to verify peers: {}", e);
+                            // Create a vector of "false" results with the same length
+                            vec![false; peer_ids.len()]
+                        }
+                    };
+                    
+                    // Process each peer
+                    let mut peers = self.peers.write().unwrap();
+                    
+                    // Track discovered peer types to update our local state
+                    let mut discovered_types: HashSet<String> = HashSet::new();
+                    
+                    for (i, peer_id) in peer_ids.iter().enumerate() {
+                        let is_valid = verification_results.get(i).copied().unwrap_or(false);
+                        
+                        if is_valid {
+                            // Peer is valid, get more information about it
+                            // For now, we'll extract tee_type from the peer_id format "id:type"
+                            let tee_type_str = peer_id.split(':').nth(1).unwrap_or("IntelSGX");
+                            let tee_type = match tee_type_str.parse::<TeeType>() {
+                                Ok(t) => t,
+                                Err(_) => {
+                                    warn!("Invalid TEE type in peer ID: {}", peer_id);
+                                    TeeType::IntelSGX  // Default to IntelSGX
+                                }
+                            };
+                            
+                            // Create a key for this peer type in the region
+                            let peer_key = format!("{}:{}", self.config.region_id, tee_type.to_string());
+                            discovered_types.insert(peer_key.clone());
+                            
+                            // Generate a simulated endpoint for this peer (would be real in production)
+                            let endpoint = if self.config.enhanced_discovery {
+                                // In production, we would get real endpoints from a service directory
+                                format!("https://{}.{}.example.com", peer_id, self.config.region_id) 
+                            } else {
+                                // Simulated endpoint for testing
+                                format!("http://localhost:808{}", i % 10)
+                            };
+                            
+                            // Update or add the peer
+                            if let Some(existing_peer) = peers.get_mut(&peer_key) {
+                                // Update existing peer
+                                existing_peer.tee_id = peer_id.clone();
+                                existing_peer.tee_type = tee_type.to_string();
+                                existing_peer.region_id = self.config.region_id.clone();
+                                existing_peer.endpoint = endpoint;
+                                existing_peer.status = "active".to_string();
+                                existing_peer.last_updated = std::time::SystemTime::now();
+                                existing_peer.latency_history = Vec::new();
+                                existing_peer.success_count = 0;
+                                existing_peer.failure_count = 0;
+                            } else {
+                                // Add new peer
+                                let peer_state = PeerState {
+                                    tee_id: peer_id.clone(),
+                                    tee_type: tee_type.to_string(),
+                                    region_id: self.config.region_id.clone(),
+                                    endpoint,
+                                    status: "active".to_string(),
+                                    last_updated: std::time::SystemTime::now(),
+                                    latency_history: Vec::new(),
+                                    success_count: 0,
+                                    failure_count: 0,
+                                };
+                                peers.insert(peer_key.clone(), peer_state);
+                            }
+                        } else {
+                            warn!("Peer {} failed verification", peer_id);
+                        }
+                    }
+                    
+                    // Remove peers that were not in this discovery round
+                    // We only remove peers for types we discovered this round to avoid removing peers of other types
+                    peers.retain(|key, peer| {
+                        let key_parts: Vec<&str> = key.split(':').collect();
+                        if key_parts.len() == 2 && key_parts[0] == self.config.region_id && discovered_types.contains(key) {
+                            // This is a peer in our region of a type we discovered this round
+                            // Keep it only if it's recently updated
+                            if let Ok(duration) = std::time::SystemTime::now().duration_since(peer.last_updated) {
+                                // Keep peers seen in the last hour
+                                duration < Duration::from_secs(3600)
+                            } else {
+                                // If time went backwards, keep the peer
+                                true
+                            }
+                        } else {
+                            // This is a peer from another region or of a type we didn't discover this round
+                            // Keep it
+                            true
+                        }
+                    });
+                    
+                    debug!("After refresh: {} peers in region {}", 
+                           peers.values().filter(|p| p.region_id == self.config.region_id).count(),
+                           self.config.region_id);
+                }
+                Err(e) => {
+                    error!("Failed to get peers from accumulator: {}", e);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to get peers: {}", e)
+                    ));
+                }
+            }
+        } else {
+            // No accumulator client, use simulated peers for backward compatibility
+            debug!("No accumulator client available, using simulated peers");
+            
+            // Create simulated peers for testing
+            let mut peers = self.peers.write().unwrap();
+            
+            // Add a simulated peer for each TEE type in the region
+            for tee_type in [TeeType::IntelSGX, TeeType::SEV].iter() {
+                let peer_key = format!("{}:{}", self.config.region_id, tee_type.to_string());
+                let peer_id = format!("sim-{}-{}", self.config.region_id, tee_type.to_string());
+                
+                // Create simulated endpoint
+                let endpoint = format!("http://localhost:8080");
+                
+                // Add or update peer
+                let peer_state = PeerState {
+                    tee_id: peer_id.clone(),
+                    tee_type: tee_type.to_string(),
+                    region_id: self.config.region_id.clone(),
+                    endpoint,
+                    status: "active".to_string(),
+                    last_updated: std::time::SystemTime::now(),
+                    latency_history: Vec::new(),
+                    success_count: 0,
+                    failure_count: 0,
+                };
+                
+                peers.insert(peer_key.clone(), peer_state);
+                info!("Added simulated peer: {} in region {}", peer_id, self.config.region_id);
+            }
+        }
         
         Ok(())
     }
@@ -786,7 +993,10 @@ impl MeshCoordinator {
     
     // Generate a cache key
     fn generate_cache_key(&self, target_tee: &str, region_id: &str, tee_type: &str, input: &[u8]) -> String {
+        use sha2::{Sha256, Digest};
+        
         let mut hasher = Sha256::new();
+        
         hasher.update(target_tee.as_bytes());
         hasher.update(region_id.as_bytes());
         hasher.update(tee_type.as_bytes());
@@ -845,7 +1055,7 @@ impl MeshCoordinator {
                 region_id: p.region_id.clone(),
                 endpoint: p.endpoint.clone(),
                 status: p.status.clone(),
-                latency_ms: p.latency_ms, // Use existing latency_ms field
+                latency_ms: p.latency_history.last().unwrap_or(&Duration::from_millis(0)).as_millis() as f64,
             })
             .collect();
         
@@ -856,7 +1066,7 @@ impl MeshCoordinator {
                 let tee_type_value = if let Some(t) = tee_type.clone() {
                     t
                 } else if i % 2 == 0 {
-                    "SGX".to_string()
+                    "IntelSGX".to_string()
                 } else {
                     "SEV".to_string()
                 };
@@ -985,7 +1195,7 @@ impl MeshCoordinator {
     
     // Execute a batch of operations for higher throughput
     pub async fn execute_batch(
-        &self,
+        self: Arc<Self>,  // Change &self to self: Arc<Self> to ensure ownership
         operations: Vec<BatchOperation>,
         timeout: Duration,
         allow_fallback: bool,
@@ -1304,54 +1514,25 @@ impl MeshCoordinator {
         }
         hash
     }
+}
 
-    // Clone this struct for usage in tokio spawn
-    pub fn clone(&self) -> Self {
-        let peers_clone = match self.peers.read() {
-            Ok(peers) => {
-                let mut new_peers = HashMap::new();
-                for (key, value) in peers.iter() {
-                    new_peers.insert(key.clone(), value.clone());
-                }
-                new_peers
-            },
-            Err(_) => HashMap::new(),
-        };
-        
-        let cache_clone = match self.cache.read() {
-            Ok(cache) => {
-                let mut new_cache = HashMap::new();
-                for (key, value) in cache.iter() {
-                    new_cache.insert(key.clone(), value.clone());
-                }
-                new_cache
-            },
-            Err(_) => HashMap::new(),
-        };
-        
-        let local_state_clone = match self.local_state.read() {
-            Ok(state) => {
-                let mut new_state = HashMap::new();
-                for (key, value) in state.iter() {
-                    new_state.insert(key.clone(), value.clone());
-                }
-                new_state
-            },
-            Err(_) => HashMap::new(),
-        };
-        
-        MeshCoordinator {
+// Clone implementation for MeshCoordinator
+impl Clone for MeshCoordinator {
+    fn clone(&self) -> Self {
+        Self {
             config: self.config.clone(),
-            peers: RwLock::new(peers_clone),
-            cache: RwLock::new(cache_clone),
-            local_state: RwLock::new(local_state_clone),
+            peers: Arc::new(RwLock::new(self.peers.read().unwrap().clone())),
+            cache: Arc::new(RwLock::new(self.cache.read().unwrap().clone())),
+            local_state: Arc::new(RwLock::new(self.local_state.read().unwrap().clone())),
             // Create a new semaphore with the same permits as the original
             max_concurrent_executions: Semaphore::new(self.config.max_peers),
             connection_pool: self.connection_pool.clone(),
+            accumulator_client: self.accumulator_client.clone(),
         }
     }
 }
 
+// Attestation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attestation {
     pub enclave_type: String,
@@ -1363,5 +1544,76 @@ pub struct Attestation {
 // DiscoveryServiceConfig is a placeholder for the enhanced discovery configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryServiceConfig {
-    // Add fields for enhanced discovery configuration here
+    /// List of initial bootstrap peers
+    pub bootstrap_peers: Vec<String>,
+    
+    /// Local peer's ID
+    pub peer_id: String,
+    
+    /// Region ID for the peer
+    pub region_id: String,
+    
+    /// Locality information for the peer
+    pub locality: Option<LocalityInfoDto>,
+    
+    /// Maximum connections per region
+    pub max_connections_per_region: usize,
+    
+    /// Maximum inactive time for connections before pruning
+    pub max_inactive_time_sec: u64,
+    
+    /// Time interval (in seconds) for heartbeat messages
+    pub heartbeat_interval_sec: u64,
+    
+    /// Maximum number of peers to exchange during discovery
+    pub max_peers_exchange: usize,
+    
+    /// Maximum age of peer information before it's considered stale
+    pub max_peer_age_sec: u64,
+    
+    /// Maximum number of peers to maintain in super peer set
+    pub max_superpeers: usize,
+    
+    /// Whether to enable peer gossip
+    pub enable_gossip: bool,
+    
+    /// Maximum number of hops for peer gossip
+    pub max_gossip_hops: u32,
+    
+    /// Whether to use enhanced discovery (with accumulator)
+    pub enhanced_discovery: bool,
+    
+    /// Local identity for attestation (base64 encoded)
+    pub local_identity: Option<String>,
+    
+    /// Endpoint for the accumulator service
+    pub accumulator_endpoint: Option<String>,
+}
+
+impl MeshCoordinator {
+    pub fn compute_mesh_state_hash(&self) -> Vec<u8> {
+        use sha2::{Sha256, Digest};
+        
+        let mut hasher = Sha256::new();
+        
+        // Add peers to hash
+        if let Ok(peers) = self.peers.read() {
+            for (key, peer) in peers.iter() {
+                hasher.update(key.as_bytes());
+                hasher.update(peer.tee_id.as_bytes());
+                hasher.update(peer.endpoint.as_bytes());
+            }
+        }
+        
+        // Add local state to hash
+        if let Ok(state) = self.local_state.read() {
+            for (key, value) in state.iter() {
+                hasher.update(key.as_bytes());
+                hasher.update(value);
+            }
+        }
+        
+        let hash = hasher.finalize().to_vec();
+        hash
+    }
 }

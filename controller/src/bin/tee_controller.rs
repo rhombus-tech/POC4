@@ -75,6 +75,10 @@ struct Args {
     /// Verbose output
     #[clap(long)]
     verbose: bool,
+
+    /// Accumulator endpoint
+    #[clap(long)]
+    accumulator_endpoint: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -294,14 +298,16 @@ async fn main() -> Result<(), std::io::Error> {
         let config = MeshConfig {
             region_id: args.region_id.clone(),
             tee_id: tee_id.clone(),
-            endpoint: args.discovery_endpoint.clone(),
+            endpoint: format!("{}:{}", args.discovery_endpoint, args.port),
             discovery_endpoint: args.discovery_endpoint.clone(),
             max_peers: args.max_peers,
             discovery_interval_sec: args.peer_refresh_interval_sec,
             circuit_breaker_threshold: Duration::from_millis(args.circuit_breaker_threshold_ms),
             peer_refresh_interval: Duration::from_secs(args.peer_refresh_interval_sec),
             enhanced_discovery: false, // Using the traditional discovery service by default
-            enhanced_discovery_config: None, // Can be configured via command line args in the future
+            discovery_config: None, // Can be configured via command line args in the future
+            accumulator_endpoint: args.accumulator_endpoint.clone().unwrap_or_else(|| "http://localhost:8090".to_string()).into(),
+            local_identity: tee_id.clone().into(), // Using tee_id as local identity
         };
         Some(config)
     } else {
@@ -312,7 +318,7 @@ async fn main() -> Result<(), std::io::Error> {
     let mesh_coordinator = match mesh_config {
         Some(config) => {
             match MeshCoordinator::new(config).await {
-                Ok(coordinator) => Some(Arc::new(coordinator)),
+                Ok(coordinator) => Some(coordinator),
                 Err(e) => {
                     error!("Failed to initialize mesh coordinator: {:?}", e);
                     None
@@ -466,7 +472,7 @@ async fn handle_mesh_execute(
     
     // Execute via mesh
     let tee_type = match tee_type.to_lowercase().as_str() {
-        "sgx" => MeshTeeType::SGX,
+        "sgx" => MeshTeeType::IntelSGX,
         "sev" => MeshTeeType::SEV,
         _ => {
             error!("Unsupported TEE type: {}", tee_type);
@@ -515,7 +521,7 @@ async fn handle_discover_peers(
     let tee_type_enum = match tee_type {
         Some(typ) => {
             match typ.to_lowercase().as_str() {
-                "sgx" => Some(MeshTeeType::SGX),
+                "sgx" => Some(MeshTeeType::IntelSGX),
                 "sev" => Some(MeshTeeType::SEV),
                 _ => {
                     error!("Unsupported TEE type: {}", typ);
@@ -600,7 +606,7 @@ async fn handle_execute_with_mesh_cache(
     
     // Execute via mesh
     let tee_type = match tee_type.to_lowercase().as_str() {
-        "sgx" => MeshTeeType::SGX,
+        "sgx" => MeshTeeType::IntelSGX,
         "sev" => MeshTeeType::SEV,
         _ => {
             error!("Unsupported TEE type: {}", tee_type);

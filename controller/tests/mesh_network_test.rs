@@ -59,32 +59,32 @@ impl TestTeeNode {
             circuit_breaker_threshold: Duration::from_secs(3),
             peer_refresh_interval: Duration::from_secs(30),
             enhanced_discovery: false, // Initially set to false for backward compatibility
-            enhanced_discovery_config: None, // Using the default discovery service for tests
+            discovery_config: None, // Using the default discovery service for tests
+            accumulator_endpoint: Some("http://localhost:8090".to_string()),
+            local_identity: Some(self.id.clone()),
         };
         
         // Initialize mesh coordinator
-        let mesh_coordinator = MeshCoordinator::new(config.clone()).await?;
+        let mesh_coordinator_arc = MeshCoordinator::new(config.clone()).await?;
         
         // Instead of calling start_discovery directly, we'll spawn our own discovery task
-        // since start_discovery is private in the actual implementation
+        // since we've already started discovery in the MeshCoordinator::new method
         let config_clone = config.clone();
-        let mesh_coordinator_arc = Arc::new(mesh_coordinator.clone());
+        let mesh_coordinator_arc_clone = Arc::clone(&mesh_coordinator_arc);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(config_clone.discovery_interval_sec));
             loop {
                 interval.tick().await;
                 // We can't call refresh_peers directly since it's private
                 // In a real test, this would perform a direct discovery request
-                let discovery_endpoint = &config_clone.discovery_endpoint;
-                println!("Simulating peer discovery for TEE ID: {} to endpoint: {}", 
-                         config_clone.tee_id, discovery_endpoint);
+                println!("Simulating peer discovery for TEE ID: {}", config_clone.tee_id);
                 // Sleep to simulate discovery work
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         });
         
         // Store mesh coordinator
-        self.mesh_coordinator = Some(Arc::new(mesh_coordinator));
+        self.mesh_coordinator = Some(mesh_coordinator_arc);
         
         Ok(())
     }
@@ -146,7 +146,7 @@ impl TestTeeNode {
             let result = mesh_coordinator.execute(
                 target_tee.to_string(),
                 self.region_id.clone(),
-                self.tee_type.to_string(),
+                self.get_compatible_tee_type_string(),
                 real_input,
                 Duration::from_secs(10),
                 false,
@@ -161,6 +161,9 @@ impl TestTeeNode {
     
     async fn execute_batch_via_mesh(&self, operations: Vec<(String, String, Vec<u8>, String)>) -> Result<Vec<Vec<u8>>, std::io::Error> {
         if let Some(mesh_coordinator) = &self.mesh_coordinator {
+            // Clone Arc for use with execute_batch which now takes Arc<Self>
+            let mesh_coordinator_arc = Arc::clone(mesh_coordinator);
+            
             // Simulate network latency for mesh communication (only once for the batch)
             if self.simulated_network_latency_ms > 0 {
                 debug!("Simulating network latency of {}ms for batch TEE-to-TEE communication", self.simulated_network_latency_ms);
@@ -176,14 +179,14 @@ impl TestTeeNode {
                 BatchOperation {
                     target_tee,
                     region_id: self.region_id.clone(),
-                    tee_type: self.tee_type.to_string(),
+                    tee_type: self.get_compatible_tee_type_string(),
                     input: real_input,
                     operation_id: Uuid::new_v4().to_string(),
                 }
             }).collect();
             
             // Execute batch over the mesh
-            let result = mesh_coordinator.execute_batch(
+            let result = mesh_coordinator_arc.execute_batch(
                 batch_operations,
                 Duration::from_secs(30),
                 true,
@@ -212,6 +215,13 @@ impl TestTeeNode {
     
     fn set_network_latency(&mut self, latency_ms: u64) {
         self.simulated_network_latency_ms = latency_ms;
+    }
+    
+    fn get_compatible_tee_type_string(&self) -> String {
+        match self.tee_type {
+            TeeType::IntelSGX => "INTEL_SGX".to_string(),
+            TeeType::SEV => "SEV".to_string(),
+        }
     }
 }
 
@@ -279,7 +289,7 @@ impl MeshTestHarness {
                                 tee_id: id.clone(),
                                 endpoint: format!("http://{}", node.addr),
                                 region_id: node.region_id.clone(),
-                                tee_type: node.tee_type.to_string(),
+                                tee_type: node.get_compatible_tee_type_string(),
                                 latency_ms: 5.0,
                                 status: "active".to_string(),
                             };
@@ -355,7 +365,7 @@ impl MeshTestHarness {
         let sev_id = format!("{}-sev", pair_id);
         
         // Create SGX node
-        self.add_node(&sgx_id, region_id, TeeType::SGX, base_port).await?;
+        self.add_node(&sgx_id, region_id, TeeType::IntelSGX, base_port).await?;
         
         // Create SEV node
         self.add_node(&sev_id, region_id, TeeType::SEV, base_port + 1).await?;
@@ -380,12 +390,12 @@ impl MeshTestHarness {
                 format!("Pair {} not found", pair_id)))?;
         
         let source_id = match source_type {
-            TeeType::SGX => &pair.sgx_node_id,
+            TeeType::IntelSGX => &pair.sgx_node_id,
             TeeType::SEV => &pair.sev_node_id,
         };
         
         let target_id = match target_type {
-            TeeType::SGX => &pair.sgx_node_id,
+            TeeType::IntelSGX => &pair.sgx_node_id,
             TeeType::SEV => &pair.sev_node_id,
         };
         
@@ -414,7 +424,7 @@ impl MeshTestHarness {
             println!("Testing SGX to SEV execution in pair {}", pair_id);
             let result = self.execute_across_pair(
                 pair_id, contract_id, "execute", &store_input, 
-                TeeType::SGX, TeeType::SEV
+                TeeType::IntelSGX, TeeType::SEV
             ).await.map_err(|e| format!("Failed to execute SGX to SEV in pair {}: {}", pair_id, e))?;
             
             // Test from SEV to SGX
@@ -425,7 +435,7 @@ impl MeshTestHarness {
             println!("Testing SEV to SGX execution in pair {}", pair_id);
             let result = self.execute_across_pair(
                 pair_id, contract_id, "execute", &store_input, 
-                TeeType::SEV, TeeType::SGX
+                TeeType::SEV, TeeType::IntelSGX
             ).await.map_err(|e| format!("Failed to execute SEV to SGX in pair {}: {}", pair_id, e))?;
         }
         
@@ -544,7 +554,7 @@ impl MeshTestHarness {
         let pair2_id = pair_ids[1];
         
         // Test SGX failure in first pair
-        self.test_pair_failover(pair1_id, contract_id, TeeType::SGX).await?;
+        self.test_pair_failover(pair1_id, contract_id, TeeType::IntelSGX).await?;
         
         // Test SEV failure in second pair
         self.test_pair_failover(pair2_id, contract_id, TeeType::SEV).await?;
@@ -569,12 +579,12 @@ impl MeshTestHarness {
         
         // Target should be the non-failed node in the target pair
         let target_id = match failed_type {
-            TeeType::SGX => &pair.sev_node_id,  // If SGX failed, use SEV
+            TeeType::IntelSGX => &pair.sev_node_id,  // If SGX failed, use SEV
             TeeType::SEV => &pair.sgx_node_id,  // If SEV failed, use SGX
         };
         
         let failed_id = match failed_type {
-            TeeType::SGX => &pair.sgx_node_id,
+            TeeType::IntelSGX => &pair.sgx_node_id,
             TeeType::SEV => &pair.sev_node_id,
         };
         
@@ -1197,7 +1207,7 @@ async fn test_mesh_network_batch_vs_individual() {
         
         // Determine which pair to target based on operation index
         let pair_index = i % 5;
-        let target_type = if i % 2 == 0 { TeeType::SGX } else { TeeType::SEV };
+        let target_type = if i % 2 == 0 { TeeType::IntelSGX } else { TeeType::SEV };
         let target_tee_id = format!("pair-{}-{}", pair_index, target_type.to_string().to_lowercase());
         
         operations.push((contract_id.to_string(), "store".to_string(), input, target_tee_id));

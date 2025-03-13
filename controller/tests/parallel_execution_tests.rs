@@ -79,7 +79,7 @@ fn calculate_percentiles(execution_times: &[Duration]) -> (f64, f64, f64) {
 
 /// Mock implementation of TeeExecutor for testing
 #[derive(Clone)]
-struct MockTeeExecutor {
+pub struct MockTeeExecutor {
     // Add internal state for the mock
     counter: Arc<AtomicUsize>,
     // Add a shared key-value store for persistence
@@ -87,7 +87,7 @@ struct MockTeeExecutor {
 }
 
 impl MockTeeExecutor {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             counter: Arc::new(AtomicUsize::new(0)),
             kv_store: Arc::new(RwLock::new(HashMap::new())),
@@ -1128,32 +1128,36 @@ async fn test_standard_interface_parallel_execution() -> Result<(), Box<dyn Erro
         
         parallel_futures.push(async move {
             // First store a value
-            let store_payload = ExecutionPayload {
-                params: ExecutionParams {
-                    id_to: format!("batch-contract-{}", i), // Use 10 different contracts
-                    function_call: "execute".to_string(),
-                    detailed_proof: false,
-                    expected_hash: Vec::new(),
-                },
+            let set_params = ExecutionParams {
+                id_to: key_value_id_clone.to_string(),
+                function_call: "set".to_string(),
+                detailed_proof: false,
+                expected_hash: Vec::new(),
+            };
+            
+            let set_payload = ExecutionPayload {
                 input: format!("{},{}", key, value).into_bytes(),
-                operation_id: Some(Uuid::new_v4().to_string()),
+                params: set_params,
+                operation_id: Some(format!("op-set-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
             };
             
-            println!("DEBUG: Storing value: {} for key: {} in contract: {}", value, key, store_payload.params.id_to);
-            let _result = tee_clone.execute(&store_payload).await?;
+            println!("DEBUG: Storing value: {} for key: {} in contract: {}", value, key, set_payload.params.id_to);
+            let _result = tee_clone.execute(&set_payload).await?;
             
             // Then immediately try to retrieve it
+            let get_params = ExecutionParams {
+                id_to: key_value_id_clone.to_string(),
+                function_call: "get".to_string(),
+                detailed_proof: false,
+                expected_hash: Vec::new(),
+            };
+            
             let get_payload = ExecutionPayload {
-                params: ExecutionParams {
-                    id_to: format!("batch-contract-{}", i), // Use 10 different contracts
-                    function_call: "execute".to_string(),
-                    detailed_proof: false,
-                    expected_hash: Vec::new(),
-                },
                 input: key.clone().into_bytes(),
-                operation_id: Some(Uuid::new_v4().to_string()),
+                params: get_params,
+                operation_id: Some(format!("op-get-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
             };
@@ -1207,7 +1211,7 @@ async fn test_standard_interface_parallel_execution_with_tee_pair() -> Result<()
     let mut handles = Vec::new();
     let contract_id_arc = Arc::new(contract_id);
     for i in 0..num_operations {
-        let tee_clone = arc_tee_pair.clone();
+        let tee_clone: Arc<MockTeeExecutor> = Arc::clone(&arc_tee_pair);
         let contract_id_clone = Arc::clone(&contract_id_arc);
         let value = i as u64 + rand::random::<u64>();
         
@@ -1283,7 +1287,7 @@ async fn deploy_contract_test() -> Result<(), Box<dyn Error>> {
     
     // Run concurrent operations against the contract
     let handles = (0..NUM_OPERATIONS).map(|i| {
-        let tee_clone2 = Arc::clone(&tee_pair);
+        let tee_clone2: Arc<MockTeeExecutor> = Arc::clone(&tee_pair);
         let contract_id = Arc::clone(&contract_id);
         let key = format!("key_{}", i);
         let value = format!("value_{}", i);
@@ -1366,7 +1370,7 @@ async fn test_token_transfer() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Run concurrent transfers 
     let mut handles = Vec::new();
     for i in 0..NUM_OPERATIONS {
-        let tee_clone2 = Arc::clone(&tee_pair);
+        let tee_clone2: Arc<MockTeeExecutor> = Arc::clone(&tee_pair);
         let contract_id_clone = contract_id.clone();
         let value = rand::random::<u64>();
         
@@ -1442,7 +1446,7 @@ async fn test_parallel_submission() -> Result<(), Box<dyn Error + Send + Sync>> 
     // Run multiple operations concurrently
     let mut handles = Vec::new();
     for i in 0..50 {
-        let tee_clone2 = Arc::clone(&tee_executor);
+        let tee_clone2: Arc<MockTeeExecutor> = Arc::clone(&tee_executor);
         let contract_id_clone = contract_id.clone();
         
         let handle = tokio::spawn(async move {

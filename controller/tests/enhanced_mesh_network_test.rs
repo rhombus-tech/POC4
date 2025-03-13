@@ -1,23 +1,33 @@
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 use std::sync::Arc;
+use std::net::{SocketAddr, Ipv4Addr};
+use std::time::{Duration, Instant};
+use log::{debug, info, warn, error};
+use tokio::time::sleep;
+use uuid::Uuid;
+use chrono::Utc;
 use std::str::FromStr;
 
 use tee_controller::{
     HyperTeeController, 
     TeePeerService,
     EnhancedDiscoveryIntegration,
-    mesh::{MeshConfig, PeerInfo, BatchOperation, TeeType, MeshCoordinator, DiscoveryServiceConfig},
-    discovery_service::{LocalityInfoDto, LatencyProfileDto, NetworkCoordinatesDto, DiscoveryService, DiscoveryServiceConfig as DiscoverySvcConfig}
+    mesh::{MeshConfig, PeerInfo, BatchOperation, TeeType, MeshCoordinator},
 };
+// Import both types with aliases to avoid confusion
+use tee_controller::discovery_service::{
+    LocalityInfoDto, LatencyProfileDto, NetworkCoordinatesDto, DiscoveryService,
+    DiscoveryServiceConfig as DiscoveryConfig
+};
+use tee_controller::mesh::DiscoveryServiceConfig as MeshDiscoveryConfig;
+
 use tee_controller::proto::teeservice::{ExecutionRequest, ExecutionResult};
 use tee_interface::{ExecutionPayload, TeeExecutor, ExecutionParams};
 use tokio::sync::{mpsc, Mutex};
-use log::info;
-use uuid::Uuid;
+use std::collections::{HashMap, HashSet};
+use rand::distributions::Uniform;
+use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 use serde_json::json;
-use tokio::time::sleep;
 
 // Create a struct for our region hierarchy test setup
 struct RegionHierarchyTestSetup {
@@ -428,7 +438,7 @@ impl EnhancedMeshTestHarness {
         // Create SGX node
         let sgx_id = format!("{}-sgx", pair_id);
         let sgx_port = base_port;
-        self.add_node(&sgx_id, region_id, TeeType::SGX, sgx_port).await?;
+        self.add_node(&sgx_id, region_id, TeeType::IntelSGX, sgx_port).await?;
         
         // Create SEV node
         let sev_id = format!("{}-sev", pair_id);
@@ -852,78 +862,71 @@ impl EnhancedTestTeeNode {
             circuit_breaker_threshold: Duration::from_secs(3),
             peer_refresh_interval: Duration::from_secs(30),
             enhanced_discovery: true, // Enable enhanced discovery
-            enhanced_discovery_config: Some(DiscoveryServiceConfig {}), // Fix: use empty placeholder DiscoveryServiceConfig
-            // enhanced_discovery_config: Some(mesh::DiscoveryServiceConfig {
-            //     bootstrap_peers: vec![discovery_endpoint.to_string()],
-            //     peer_id: self.id.clone(),
-            //     region_id: self.region_id.clone(),
-            //     locality: Some(LocalityInfoDto {
-            //         region_id: self.region_id.clone(),
-            //         zone_id: Some("us-west-1".to_string()),
-            //         latency_profile: Some(LatencyProfileDto {
-            //             avg_latency_ms: 5.0,
-            //             std_dev_ms: 1.0,
-            //             max_latency_ms: 100.0,
-            //             min_latency_ms: 2.0,
-            //         }),
-            //         coordinates: Some(NetworkCoordinatesDto {
-            //             x: 0.0,
-            //             y: 0.0,
-            //             z: Some(0.0),
-            //         }),
-            //         last_update: current_timestamp(),
-            //     }),
-            //     max_connections_per_region: 5,
-            //     max_inactive_time_sec: 60,
-            //     heartbeat_interval_sec: 15,
-            //     max_peers_exchange: 10,
-            //     max_peer_age_sec: 3600,
-            //     max_superpeers: 3,
-            //     enable_gossip: true,
-            //     max_gossip_hops: 3,
-            // }),
+            discovery_config: Some(MeshDiscoveryConfig {
+                bootstrap_peers: vec![discovery_endpoint.to_string()],
+                peer_id: self.id.clone(),
+                region_id: self.region_id.clone(),
+                locality: Some(LocalityInfoDto {
+                    region_id: self.region_id.clone(),
+                    zone_id: Some("us-west-1".to_string()),
+                    latency_profile: Some(LatencyProfileDto {
+                        avg_latency_ms: 5.0,
+                        std_dev_ms: 1.0,
+                        max_latency_ms: 100.0,
+                        min_latency_ms: 2.0,
+                    }),
+                    coordinates: Some(NetworkCoordinatesDto {
+                        x: 0.0,
+                        y: 0.0,
+                        z: Some(0.0),
+                    }),
+                    last_update: current_timestamp(),
+                }),
+                max_connections_per_region: 5,
+                max_inactive_time_sec: 60,
+                heartbeat_interval_sec: 15,
+                max_peers_exchange: 10,
+                max_peer_age_sec: 3600,
+                max_superpeers: 3,
+                enable_gossip: true,
+                max_gossip_hops: 3,
+                enhanced_discovery: true,
+                local_identity: Some(self.id.clone()),
+                accumulator_endpoint: Some("http://localhost:8090".to_string()),
+            }),
+            accumulator_endpoint: Some("http://localhost:8090".to_string()),
+            local_identity: Some(self.id.clone()),
         };
         
-        // Create mesh coordinator
-        let mesh = Arc::new(MeshCoordinator::new(config.clone()).await.expect("Failed to create mesh coordinator"));
+        // Create mesh coordinator - MeshCoordinator::new already returns Arc<MeshCoordinator>
+        let mesh_coordinator = MeshCoordinator::new(config.clone()).await.expect("Failed to create mesh coordinator");
         
         // Create enhanced discovery service if needed
         if config.enhanced_discovery {
-            if let Some(_) = config.enhanced_discovery_config.clone() {
-                // Create the proper DiscoveryServiceConfig for DiscoveryService::new_with_params
-                let discovery_config = DiscoverySvcConfig {
-                    bootstrap_peers: vec![discovery_endpoint.to_string()],
-                    peer_id: self.id.clone(),
-                    region_id: self.region_id.clone(),
-                    locality: Some(LocalityInfoDto {
-                        region_id: self.region_id.clone(),
-                        zone_id: Some("us-west-1".to_string()),
-                        latency_profile: Some(LatencyProfileDto {
-                            avg_latency_ms: 5.0,
-                            std_dev_ms: 1.0,
-                            max_latency_ms: 100.0,
-                            min_latency_ms: 2.0,
-                        }),
-                        coordinates: Some(NetworkCoordinatesDto {
-                            x: 0.0,
-                            y: 0.0,
-                            z: Some(0.0),
-                        }),
-                        last_update: current_timestamp(),
-                    }),
-                    max_connections_per_region: 5,
-                    max_inactive_time_sec: 60,
-                    heartbeat_interval_sec: 15,
-                    max_peers_exchange: 10,
-                    max_peer_age_sec: 3600,
-                    max_superpeers: 3,
-                    enable_gossip: true,
-                    max_gossip_hops: 3,
+            if let Some(mesh_discovery_cfg) = config.discovery_config.clone() {
+                // Convert from mesh::DiscoveryServiceConfig to discovery_service::DiscoveryServiceConfig
+                let discovery_cfg = DiscoveryConfig {
+                    bootstrap_peers: mesh_discovery_cfg.bootstrap_peers,
+                    peer_id: mesh_discovery_cfg.peer_id,
+                    region_id: mesh_discovery_cfg.region_id,
+                    locality: mesh_discovery_cfg.locality,
+                    max_connections_per_region: mesh_discovery_cfg.max_connections_per_region,
+                    max_inactive_time_sec: mesh_discovery_cfg.max_inactive_time_sec,
+                    heartbeat_interval_sec: mesh_discovery_cfg.heartbeat_interval_sec,
+                    max_peers_exchange: mesh_discovery_cfg.max_peers_exchange,
+                    max_peer_age_sec: mesh_discovery_cfg.max_peer_age_sec,
+                    max_superpeers: mesh_discovery_cfg.max_superpeers,
+                    enable_gossip: mesh_discovery_cfg.enable_gossip,
+                    max_gossip_hops: mesh_discovery_cfg.max_gossip_hops,
+                    enhanced_discovery: mesh_discovery_cfg.enhanced_discovery,
+                    local_identity: mesh_discovery_cfg.local_identity,
+                    accumulator_endpoint: mesh_discovery_cfg.accumulator_endpoint,
                 };
-
+                
+                // Use the converted config
                 let discovery_service = Arc::new(DiscoveryService::new_with_params(
-                    mesh.clone(),
-                    discovery_config,
+                    mesh_coordinator.clone(),
+                    discovery_cfg,
                 ).await.expect("Failed to create discovery service"));
                 
                 let discovery_integration = EnhancedDiscoveryIntegration::new(Arc::clone(&discovery_service));
@@ -931,8 +934,8 @@ impl EnhancedTestTeeNode {
             }
         }
         
-        // Store mesh coordinator
-        self.mesh_coordinator = Some(mesh);
+        // Store mesh coordinator - it's already an Arc<MeshCoordinator>
+        self.mesh_coordinator = Some(mesh_coordinator);
         
         Ok(())
     }

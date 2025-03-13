@@ -50,9 +50,13 @@ async fn test_hierarchical_regions() {
         circuit_breaker_threshold: std::time::Duration::from_secs(30),
         peer_refresh_interval: std::time::Duration::from_secs(300),
         enhanced_discovery: false, // Use simulation mode
-        enhanced_discovery_config: None,
+        discovery_config: None,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
-    let mesh = Arc::new(tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator"));
+    let mesh_coordinator = tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator");
+    // Clone mesh_coordinator before moving it into an Arc
+    let mesh = Arc::new(mesh_coordinator.clone());
     
     // Create discovery service with custom parameters
     let config = DiscoveryServiceConfig {
@@ -68,9 +72,12 @@ async fn test_hierarchical_regions() {
         max_superpeers: 5,
         enable_gossip: true,
         max_gossip_hops: 2,
+        enhanced_discovery: false,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
     
-    let discovery_service = DiscoveryService::new_with_params(mesh.clone(), config)
+    let discovery_service = DiscoveryService::new_with_params(mesh_coordinator.clone(), config)
         .await
         .expect("Failed to create discovery service");
     
@@ -222,9 +229,13 @@ async fn test_gossip_protocol() {
         circuit_breaker_threshold: std::time::Duration::from_secs(30),
         peer_refresh_interval: std::time::Duration::from_secs(300),
         enhanced_discovery: false, // Use simulation mode
-        enhanced_discovery_config: None,
+        discovery_config: None,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
-    let mesh = Arc::new(tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator"));
+    let mesh_coordinator = tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator");
+    // Clone mesh_coordinator before moving it into an Arc
+    let mesh = Arc::new(mesh_coordinator.clone());
     
     // Create two discovery services that will gossip to each other
     let config1 = DiscoveryServiceConfig {
@@ -240,15 +251,18 @@ async fn test_gossip_protocol() {
         max_superpeers: 5,
         enable_gossip: true,
         max_gossip_hops: 2,
+        enhanced_discovery: false,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
     
     let config2 = config1.clone();
     
-    let discovery_service1 = DiscoveryService::new_with_params(mesh.clone(), config1)
+    let discovery_service1 = DiscoveryService::new_with_params(mesh_coordinator.clone(), config1)
         .await
         .expect("Failed to create discovery service 1");
     
-    let discovery_service2 = DiscoveryService::new_with_params(mesh.clone(), config2)
+    let discovery_service2 = DiscoveryService::new_with_params(mesh_coordinator.clone(), config2)
         .await
         .expect("Failed to create discovery service 2");
     
@@ -362,9 +376,13 @@ async fn test_super_peer_management() {
         circuit_breaker_threshold: std::time::Duration::from_secs(30),
         peer_refresh_interval: std::time::Duration::from_secs(300),
         enhanced_discovery: false, // Use simulation mode
-        enhanced_discovery_config: None,
+        discovery_config: None,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
-    let mesh = Arc::new(tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator"));
+    let mesh_coordinator = tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator");
+    // Clone mesh_coordinator before moving it into an Arc
+    let mesh = Arc::new(mesh_coordinator.clone());
     
     // Create discovery service with custom parameters
     let config = DiscoveryServiceConfig {
@@ -380,9 +398,12 @@ async fn test_super_peer_management() {
         max_superpeers: 5,
         enable_gossip: true,
         max_gossip_hops: 2,
+        enhanced_discovery: false,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
     
-    let discovery_service = DiscoveryService::new_with_params(mesh.clone(), config)
+    let discovery_service = DiscoveryService::new_with_params(mesh_coordinator.clone(), config)
         .await
         .expect("Failed to create discovery service");
     
@@ -491,9 +512,13 @@ async fn test_dynamic_connection_management() {
         circuit_breaker_threshold: std::time::Duration::from_secs(30),
         peer_refresh_interval: std::time::Duration::from_secs(300),
         enhanced_discovery: false, // Use simulation mode
-        enhanced_discovery_config: None,
+        discovery_config: None,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
-    let mesh = Arc::new(tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator"));
+    let mesh_coordinator = tee_controller::mesh::MeshCoordinator::new(mesh_config).await.expect("Failed to create MeshCoordinator");
+    // Clone mesh_coordinator before moving it into an Arc
+    let mesh = Arc::new(mesh_coordinator.clone());
     
     // Create discovery service with custom parameters
     let config = DiscoveryServiceConfig {
@@ -509,9 +534,12 @@ async fn test_dynamic_connection_management() {
         max_superpeers: 5,
         enable_gossip: true,
         max_gossip_hops: 2,
+        enhanced_discovery: false,
+        accumulator_endpoint: Some("http://localhost:8090".to_string()),
+        local_identity: Some("test-tee".to_string()),
     };
     
-    let discovery_service = DiscoveryService::new_with_params(mesh.clone(), config)
+    let discovery_service = DiscoveryService::new_with_params(mesh_coordinator.clone(), config)
         .await
         .expect("Failed to create discovery service");
     

@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use async_trait::async_trait;
-use tee_interface::{TeeExecutor, ExecutionPayload, ExecutionResult, TeeError, ExecutionStats, TeeAttestation, TeeType, Region};
+use tee_interface::{TeeExecutor, ExecutionPayload, ExecutionResult, TeeError, ExecutionStats, TeeAttestation, TeeType, RegionInfo};
+use tee_interface::types::ExecutionParams;
+use crate::proto::teeservice::Region;
 use crate::simulator::Simulator;
 use wasmlanche::types::WasmlAddress;
 use uuid::Uuid;
@@ -13,12 +15,24 @@ use crate::coordinator_client::CoordinatorClient;
 use std::env;
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
+use log::{info, error};
+use crate::mesh::{MeshCoordinator, MeshConfig, MeshExecutionResult, PeerInfo, SyncResult};
+use crate::policy::{SharedPolicyManager, Policy, PolicyRule, Transaction, PolicyViolation, CircuitBreaker, CircuitBreakerLevel, TriggerCondition, RecoveryCondition, CircuitBreakerAction};
 
 // Define a constant for default gas limits
 const DEFAULT_GAS: u64 = 1_000_000;
 
 // Default coordinator URL
 const DEFAULT_COORDINATOR_URL: &str = "http://localhost:8080";
+
+// Default circuit breaker threshold (ms)
+const DEFAULT_CIRCUIT_BREAKER_THRESHOLD_MS: u64 = 100;
+
+// Default peer refresh interval (seconds)
+const DEFAULT_PEER_REFRESH_INTERVAL_SEC: u64 = 60;
+
+// Default max peers to track
+const DEFAULT_MAX_PEERS: usize = 10;
 
 // TEE execution modes
 #[derive(Clone, PartialEq)]
@@ -27,6 +41,10 @@ enum ExecutionMode {
     Direct,
     // Execution via coordinator on multiple TEE pairs
     Coordinated,
+    // Execution via direct mesh communication
+    Mesh,
+    // Automatic selection of mesh or coordinated based on routing
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +73,21 @@ pub struct HyperTeeController {
     is_primary: Arc<RwLock<bool>>,
     paired_with: Arc<RwLock<Option<String>>>,
     region_tee_pairs: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    
+    // Metrics and routing
+    metrics: Arc<crate::metrics::MetricsStore>,
+    routing_strategy: Option<Arc<crate::metrics::RoutingStrategy>>,
+    region_id: String,
+    tee_type: String,
+    
+    // Mesh network integration
+    mesh_coordinator: Option<Arc<MeshCoordinator>>,
+    mesh_enabled: bool,
+    circuit_breaker_threshold: Duration,
+    
+    // Policy enforcement
+    policy_manager: Option<Arc<SharedPolicyManager>>,
+    policy_enforcement_enabled: bool,
 }
 
 impl HyperTeeController {
@@ -84,12 +117,84 @@ impl HyperTeeController {
             None
         };
         
-        // Determine execution mode based on coordinator presence
-        let execution_mode = if coordinator.is_some() {
-            ExecutionMode::Coordinated
-        } else {
-            ExecutionMode::Direct
+        // Determine if mesh is enabled
+        let mesh_enabled = env::var("MESH_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse::<bool>()
+            .unwrap_or(false);
+            
+        // Get circuit breaker threshold
+        let circuit_breaker_threshold_ms = env::var("CIRCUIT_BREAKER_THRESHOLD_MS")
+            .unwrap_or_else(|_| DEFAULT_CIRCUIT_BREAKER_THRESHOLD_MS.to_string())
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_CIRCUIT_BREAKER_THRESHOLD_MS);
+            
+        // Get peer refresh interval
+        let peer_refresh_interval_sec = env::var("PEER_REFRESH_INTERVAL_SEC")
+            .unwrap_or_else(|_| DEFAULT_PEER_REFRESH_INTERVAL_SEC.to_string())
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_PEER_REFRESH_INTERVAL_SEC);
+            
+        // Get max peers
+        let max_peers = env::var("MAX_PEERS")
+            .unwrap_or_else(|_| DEFAULT_MAX_PEERS.to_string())
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_MAX_PEERS);
+            
+        // Get the execution mode from environment
+        let execution_mode_str = env::var("EXECUTION_MODE")
+            .unwrap_or_else(|_| "auto".to_string());
+            
+        let execution_mode = match execution_mode_str.to_lowercase().as_str() {
+            "direct" => ExecutionMode::Direct,
+            "coordinated" => ExecutionMode::Coordinated,
+            "mesh" => ExecutionMode::Mesh,
+            _ => ExecutionMode::Auto,
         };
+        
+        // Get region ID from environment or use default
+        let region_id = env::var("REGION_ID")
+            .unwrap_or_else(|_| "default".to_string());
+            
+        // Get TEE type from environment or use default
+        let tee_type = env::var("TEE_TYPE")
+            .unwrap_or_else(|_| "SGX".to_string());
+            
+        // Get discovery endpoint
+        let discovery_endpoint = env::var("DISCOVERY_ENDPOINT")
+            .unwrap_or_else(|_| "localhost:50052".to_string());
+        
+        // Initialize mesh coordinator if enabled
+        let mesh_coordinator = if mesh_enabled {
+            info!("Initializing mesh coordinator for region: {}", region_id);
+            
+            let mesh_config = MeshConfig {
+                region_id: region_id.clone(),
+                tee_id: worker_id.clone(),
+                endpoint: discovery_endpoint.clone(),
+                max_peers,
+                discovery_interval_sec: peer_refresh_interval_sec,
+                discovery_endpoint: discovery_endpoint,
+                circuit_breaker_threshold: Duration::from_millis(500), // Default 500ms threshold
+                peer_refresh_interval: Duration::from_secs(peer_refresh_interval_sec),
+                enhanced_discovery: false, // Disable enhanced discovery by default
+                discovery_config: None, // No enhanced discovery config by default
+                accumulator_endpoint: None,
+                local_identity: Some(worker_id.clone()),
+            };
+            
+            match MeshCoordinator::new(mesh_config).await {
+                Ok(coordinator) => Some(Arc::new(coordinator)), 
+                Err(e) => {
+                    error!("Failed to initialize mesh coordinator: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        let circuit_breaker_threshold = Duration::from_millis(circuit_breaker_threshold_ms);
         
         Self {
             simulator: Arc::new(RwLock::new(Simulator::new().await)),
@@ -100,9 +205,18 @@ impl HyperTeeController {
             worker_id,
             execution_mode,
             registered: Arc::new(RwLock::new(false)),
-            is_primary: Arc::new(RwLock::new(true)), // Default to primary
+            is_primary: Arc::new(RwLock::new(true)),
             paired_with: Arc::new(RwLock::new(None)),
             region_tee_pairs: Arc::new(RwLock::new(HashMap::new())),
+            metrics: Arc::new(crate::metrics::MetricsStore::new()),
+            routing_strategy: None,
+            region_id,
+            tee_type,
+            mesh_coordinator,
+            mesh_enabled,
+            circuit_breaker_threshold,
+            policy_manager: None,
+            policy_enforcement_enabled: false,
         }
     }
 
@@ -188,7 +302,7 @@ impl HyperTeeController {
             status: "pending".to_string(),
             result: None,
             context: None,
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            timestamp: chrono::Utc::now().to_rfc3339(),
         });
         
         operation_id
@@ -204,7 +318,7 @@ impl HyperTeeController {
         if let Some(op) = operations.get_mut(operation_id) {
             op.status = "completed".to_string();
             op.result = Some(result);
-            op.timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            op.timestamp = chrono::Utc::now().to_rfc3339();
             Ok(())
         } else {
             Err(TeeError::Contract(format!("Operation {} not found", operation_id)))
@@ -267,7 +381,7 @@ impl HyperTeeController {
         // Store the command in state store for debugging/tracking
         let command_key = format!("last_command_{}", contract_id);
         let mut state_store = self.state_store.write().await;
-        state_store.insert(command_key, input.to_vec());
+        state_store.insert(command_key.clone(), input.to_vec());
         drop(state_store);
         
         // Generic contract handling logic - doesn't depend on specific contract types
@@ -419,7 +533,9 @@ impl HyperTeeController {
         if region_id == "default" || region_id == "sgx-001" {
             Ok(Some(Region {
                 id: region_id.to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
                 worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
+                supported_tee_types: vec!["SGX".to_string()],
                 max_tasks: 100,
             }))
         } else {
@@ -538,11 +654,35 @@ impl HyperTeeController {
         // Ensure we're registered first
         self.initialize_coordinator().await?;
         
-        // Get the TEE pair for this region
-        let (worker1, worker2) = coordinator.get_tee_pair(region_id)
+        // Get all available workers for this region
+        let available_workers = coordinator.get_workers_for_region(region_id)
             .await
-            .map_err(|e| TeeError::ExecutionError(format!("Failed to get TEE pair: {}", e)))?;
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to get workers for region {}: {}", region_id, e)))?;
             
+        if available_workers.len() < 2 {
+            return Err(TeeError::ExecutionError(format!("Not enough workers available in region {}", region_id)));
+        }
+        
+        // Select the best workers based on metrics if routing strategy is available
+        let selected_workers = if let Some(routing_strategy) = &self.routing_strategy {
+            // Convert available workers to worker IDs
+            let worker_ids: Vec<String> = available_workers.iter().map(|w| w.id.clone()).collect();
+            
+            // Use routing strategy to select best workers
+            let best_workers = routing_strategy.select_best_workers(worker_ids, 2).await;
+            if best_workers.len() < 2 {
+                // Fall back to first two available workers if not enough best workers
+                vec![available_workers[0].id.clone(), available_workers[1].id.clone()]
+            } else {
+                best_workers
+            }
+        } else {
+            // Fall back to first two available workers
+            vec![available_workers[0].id.clone(), available_workers[1].id.clone()]
+        };
+        
+        println!("Selected workers for task: {:?}", selected_workers);
+        
         // Create mock attestations for now
         let attestations = vec![
             b"attestation-1".to_vec(),
@@ -553,7 +693,7 @@ impl HyperTeeController {
         let task_id = coordinator.submit_task(
             data,
             region_id,
-            vec![worker1, worker2],
+            selected_workers,
             attestations,
         )
         .await
@@ -611,8 +751,10 @@ impl HyperTeeController {
     
     // Execute a task through the coordinator
     async fn coordinated_execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
-        // Use default region ID since it's not in the payload
-        let region_id = "default".to_string();
+        // Always use the controller's configured region - this ensures proximity-based routing
+        let region_id = self.region_id.clone();
+        
+        println!("Executing in region: {}", region_id);
         
         // Serialize the payload
         let payload_data = serde_json::to_vec(payload)
@@ -786,7 +928,7 @@ impl HyperTeeController {
             // Mathematical operations
             "add" | "sum" => {
                 if parts.len() >= 3 {
-                    if let (Ok(a), Ok(b)) = (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                    if let (Ok(a), Ok(b)) = (parts[1].trim().parse::<u64>(), parts[2].trim().parse::<u64>()) {
                         return (a + b).to_string().as_bytes().to_vec();
                     }
                 }
@@ -794,7 +936,7 @@ impl HyperTeeController {
             },
             "multiply" => {
                 if parts.len() >= 3 {
-                    if let (Ok(a), Ok(b)) = (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                    if let (Ok(a), Ok(b)) = (parts[1].trim().parse::<u64>(), parts[2].trim().parse::<u64>()) {
                         return (a * b).to_string().as_bytes().to_vec();
                     }
                 }
@@ -977,6 +1119,46 @@ impl HyperTeeController {
         &self,
         payload: &ExecutionPayload,
     ) -> Result<ExecutionResult, TeeError> {
+        // Check policy compliance for the execution payload
+        if self.policy_enforcement_enabled {
+            if let Some(ref policy_manager) = self.policy_manager {
+                // Create a transaction from the execution payload
+                let transaction = Transaction {
+                    id: payload.operation_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    sender: "system".to_string(), // Default sender
+                    recipient: Some(payload.params.id_to.clone()),
+                    amount: 0, // Default amount
+                    contract_id: Some(payload.params.id_to.clone()),
+                    function: Some(payload.params.function_call.clone()),
+                    parameters: Some(payload.input.clone()),
+                    region_id: self.region_id.clone(), // Use controller's region
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                // Check if the transaction complies with policies
+                match policy_manager.check_transaction(&transaction).await {
+                    Ok(_) => {
+                        // Transaction is allowed, proceed with execution
+                    }
+                    Err(violation) => {
+                        // Transaction violates policy
+                        return Err(TeeError::ExecutionError(format!("Policy violation: {}", violation)));
+                    }
+                }
+                
+                // Check if any circuit breakers are active for this region
+                let circuit_breaker_status = policy_manager.get_circuit_breaker_status(self.region_id.as_str()).await;
+                for (breaker_id, is_active) in circuit_breaker_status {
+                    if is_active {
+                        // Circuit breaker is active, execution should be blocked
+                        return Err(TeeError::ExecutionError(
+                            format!("Circuit breaker '{}' is active. Execution blocked.", breaker_id)
+                        ));
+                    }
+                }
+            }
+        }
+        
         // Record start time for stats
         let start_time = std::time::Instant::now();
         
@@ -984,7 +1166,20 @@ impl HyperTeeController {
         if self.execution_mode == ExecutionMode::Coordinated && self.coordinator.is_some() {
             // Execute via coordinator
             println!("Executing in coordinated mode");
-            return self.coordinated_execute(payload).await;
+            let result = self.coordinated_execute(payload).await;
+            
+            // Record metrics based on the result
+            match &result {
+                Ok(_) => {
+                    let elapsed = start_time.elapsed().as_millis() as u64;
+                    let _ = self.metrics.record_execution(&self.region_id, "enarx-worker", &self.worker_id, elapsed as f64, true, payload.input.len() as u64, 0).await;
+                },
+                Err(_) => {
+                    let _ = self.metrics.record_execution(&self.region_id, "enarx-worker", &self.worker_id, 0.0, false, payload.input.len() as u64, 0).await;
+                }
+            }
+            
+            return result;
         }
         
         // Direct execution mode - continues with existing implementation
@@ -1009,6 +1204,15 @@ impl HyperTeeController {
             is_primary: self.is_primary.clone(),
             paired_with: self.paired_with.clone(),
             region_tee_pairs: self.region_tee_pairs.clone(),
+            metrics: self.metrics.clone(),
+            routing_strategy: self.routing_strategy.clone(),
+            region_id: self.region_id.clone(),
+            tee_type: self.tee_type.clone(),
+            mesh_coordinator: self.mesh_coordinator.clone(),
+            mesh_enabled: self.mesh_enabled,
+            circuit_breaker_threshold: self.circuit_breaker_threshold,
+            policy_manager: self.policy_manager.clone(),
+            policy_enforcement_enabled: self.policy_enforcement_enabled,
         };
         
         let payload_clone = payload.clone();
@@ -1084,6 +1288,33 @@ impl HyperTeeController {
         
         // Calculate execution time
         let execution_time = start_time.elapsed();
+        let execution_time_ms = execution_time.as_millis() as u64;
+        
+        // Record metrics for direct execution
+        match &result {
+            Ok(ref exec_result) => {
+                let _ = self.metrics.record_execution(
+                    &self.region_id,
+                    "Simulator",
+                    "sim-worker",
+                    execution_time_ms as f64,
+                    true,  // Assume success if we get here
+                    input.len() as u64,
+                    exec_result.len() as u64,
+                ).await;
+            },
+            Err(_) => {
+                let _ = self.metrics.record_execution(
+                    &self.region_id,
+                    "Simulator",
+                    "sim-worker",
+                    0.0,
+                    false,
+                    input.len() as u64,
+                    0,
+                ).await;
+            }
+        }
         
         // Prepare result
         match result {
@@ -1094,14 +1325,14 @@ impl HyperTeeController {
                 // Return successful result with stats
                 Ok(ExecutionResult {
                     result: data_vec,
-                    state_hash: vec![],
+                    state_hash: vec![0; 32], // Placeholder hash for fallback
                     stats: ExecutionStats {
-                        execution_time: execution_time.as_millis() as u64,
+                        execution_time: execution_time_ms,
                         memory_used: 0,
                         syscall_count: 0,
                     },
                     attestations: vec![TeeAttestation {
-                        enclave_id: vec![104, 121, 112, 101, 114], // "hyper" in ASCII
+                        enclave_id: vec![104, 121, 114, 101, 114], // "hyper" in ASCII
                         measurement: vec![0; 32],
                         timestamp: chrono::Utc::now().timestamp() as u64,
                         data: vec![0; 32],
@@ -1119,20 +1350,20 @@ impl HyperTeeController {
         }
     }
 
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Return mock regions for testing with the correct fields
         Ok(vec![
-            Region {
+            RegionInfo {
                 id: "sgx-region-1".to_string(),
                 worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
                 max_tasks: 100,
             },
-            Region {
+            RegionInfo {
                 id: "sgx-region-2".to_string(),
                 worker_ids: vec!["worker-3".to_string(), "worker-4".to_string()],
                 max_tasks: 100,
             },
-            Region {
+            RegionInfo {
                 id: "sev-region-1".to_string(),
                 worker_ids: vec!["worker-5".to_string(), "worker-6".to_string()],
                 max_tasks: 100,
@@ -1144,12 +1375,12 @@ impl HyperTeeController {
         // Return mock attestations for the requested region
         Ok(vec![
             TeeAttestation {
-                enclave_id: vec![104, 121, 112, 101, 114], // "hyper" in ASCII
-                measurement: vec![0; 32],
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                data: vec![0; 32],
-                signature: vec![0; 64],
-                region_proof: Some(vec![0; 32]),
+                enclave_id: b"test-enclave-id".to_vec(),
+                measurement: b"test-measurement".to_vec(),
+                timestamp: 1234567890,
+                data: b"test-data".to_vec(),
+                signature: b"test-signature".to_vec(),
+                region_proof: Some(b"test-region-proof".to_vec()),
                 enclave_type: TeeType::SGX,
             },
         ])
@@ -1173,6 +1404,46 @@ impl HyperTeeController {
 #[async_trait]
 impl TeeExecutor for HyperTeeController {
     async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
+        // Check policy compliance for the execution payload
+        if self.policy_enforcement_enabled {
+            if let Some(ref policy_manager) = self.policy_manager {
+                // Create a transaction from the execution payload
+                let transaction = Transaction {
+                    id: payload.operation_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    sender: "system".to_string(), // Default sender
+                    recipient: Some(payload.params.id_to.clone()),
+                    amount: 0, // Default amount
+                    contract_id: Some(payload.params.id_to.clone()),
+                    function: Some(payload.params.function_call.clone()),
+                    parameters: Some(payload.input.clone()),
+                    region_id: self.region_id.clone(), // Use controller's region
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                // Check if the transaction complies with policies
+                match policy_manager.check_transaction(&transaction).await {
+                    Ok(_) => {
+                        // Transaction is allowed, proceed with execution
+                    }
+                    Err(violation) => {
+                        // Transaction violates policy
+                        return Err(TeeError::ExecutionError(format!("Policy violation: {}", violation)));
+                    }
+                }
+                
+                // Check if any circuit breakers are active for this region
+                let circuit_breaker_status = policy_manager.get_circuit_breaker_status(self.region_id.as_str()).await;
+                for (breaker_id, is_active) in circuit_breaker_status {
+                    if is_active {
+                        // Circuit breaker is active, execution should be blocked
+                        return Err(TeeError::ExecutionError(
+                            format!("Circuit breaker '{}' is active. Execution blocked.", breaker_id)
+                        ));
+                    }
+                }
+            }
+        }
+        
         // When using coordinator, submit task to coordinator
         if let Ok(use_coordinator) = env::var("USE_COORDINATOR") {
             if use_coordinator == "true" {
@@ -1226,7 +1497,7 @@ impl TeeExecutor for HyperTeeController {
                                         
                                         return Ok(ExecutionResult {
                                             result: result.clone(),
-                                            state_hash: vec![],
+                                            state_hash: vec![0; 32], // Placeholder hash for fallback
                                             stats: ExecutionStats {
                                                 execution_time: 0,
                                                 memory_used: 0,
@@ -1301,7 +1572,7 @@ impl TeeExecutor for HyperTeeController {
                 
                 return Ok(ExecutionResult {
                     result: b"success".to_vec(),
-                    state_hash: vec![],
+                    state_hash: vec![0; 32], // Placeholder hash for fallback
                     stats: ExecutionStats {
                         execution_time: 0,
                         memory_used: 0,
@@ -1329,7 +1600,7 @@ impl TeeExecutor for HyperTeeController {
                         
                         return Ok(ExecutionResult {
                             result: value,
-                            state_hash: vec![],
+                            state_hash: vec![0; 32], // Placeholder hash for fallback
                             stats: ExecutionStats {
                                 execution_time: 0,
                                 memory_used: 0,
@@ -1351,7 +1622,7 @@ impl TeeExecutor for HyperTeeController {
                             // Primary worker returns "value_1"
                             return Ok(ExecutionResult {
                                 result: b"value_1".to_vec(),
-                                state_hash: vec![],
+                                state_hash: vec![0; 32], // Placeholder hash for fallback
                                 stats: ExecutionStats {
                                     execution_time: 0,
                                     memory_used: 0,
@@ -1367,7 +1638,7 @@ impl TeeExecutor for HyperTeeController {
                             // Secondary worker returns "value_2"
                             return Ok(ExecutionResult {
                                 result: b"value_2".to_vec(),
-                                state_hash: vec![],
+                                state_hash: vec![0; 32], // Placeholder hash for fallback
                                 stats: ExecutionStats {
                                     execution_time: 0,
                                     memory_used: 0,
@@ -1395,7 +1666,7 @@ impl TeeExecutor for HyperTeeController {
                 
                 return Ok(ExecutionResult {
                     result,
-                    state_hash: vec![],
+                    state_hash: vec![0; 32], // Placeholder hash for fallback
                     stats: ExecutionStats {
                         execution_time: 0,
                         memory_used: 0,
@@ -1420,7 +1691,7 @@ impl TeeExecutor for HyperTeeController {
                 
                 return Ok(ExecutionResult {
                     result: result.as_bytes().to_vec(),
-                    state_hash: vec![],
+                    state_hash: vec![0; 32], // Placeholder hash for fallback
                     stats: ExecutionStats {
                         execution_time: 0,
                         memory_used: 0,
@@ -1440,7 +1711,7 @@ impl TeeExecutor for HyperTeeController {
                 
                 return Ok(ExecutionResult {
                     result: result.as_bytes().to_vec(),
-                    state_hash: vec![],
+                    state_hash: vec![0; 32], // Placeholder hash for fallback
                     stats: ExecutionStats {
                         execution_time: 0,
                         memory_used: 0,
@@ -1456,9 +1727,9 @@ impl TeeExecutor for HyperTeeController {
         }
     }
     
-    async fn get_regions(&self) -> Result<Vec<Region>, TeeError> {
+    async fn get_regions(&self) -> Result<Vec<RegionInfo>, TeeError> {
         // Mock implementation for testing
-        let region = Region {
+        let region = RegionInfo {
             id: "test-region".to_string(),
             worker_ids: vec!["worker-1".to_string(), "worker-2".to_string()],
             max_tasks: 10,
@@ -1522,7 +1793,7 @@ impl HyperTeeController {
         
         // Store conflict data for audit
         let mut state_store = self.state_store.write().await;
-        state_store.insert(conflict_key, conflict_data.as_bytes().to_vec());
+        state_store.insert(conflict_key.clone(), conflict_data.as_bytes().to_vec());
         drop(state_store);
         
         // Conflict resolution strategies:
@@ -1635,5 +1906,372 @@ impl HyperTeeController {
         
         // Verify state consistency and resolve conflicts if needed
         self.verify_state_consistency(contract_id, key, &primary_value, &secondary_value).await
+    }
+}
+
+// Execute operations via the mesh network
+impl HyperTeeController {
+    pub async fn execute_mesh(
+        &self,
+        target_tee: &str,
+        region_id: &str,
+        input: &[u8],
+        tee_type: TeeType,
+        timeout: Duration,
+        is_async: bool,
+        allow_fallback: bool,
+    ) -> Result<MeshExecutionResult, TeeError> {
+        info!("Executing task via mesh network: target={}, region={}", target_tee, region_id);
+        
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            error!("Mesh network is not enabled");
+            return Err(TeeError::ExecutionError("Mesh network is not enabled".to_string()));
+        }
+        
+        let start_time = std::time::Instant::now();
+        
+        // Execute via mesh coordinator
+        let result = match &self.mesh_coordinator {
+            Some(coordinator) => {
+                match coordinator.execute(
+                    target_tee.to_string(),
+                    region_id.to_string(),
+                    // Convert from tee_interface::TeeType to String
+                    match tee_type {
+                        TeeType::SGX => "SGX".to_string(),
+                        TeeType::SEV => "SEV".to_string(),
+                    },
+                    input.to_vec(),
+                    timeout,
+                    is_async,
+                    allow_fallback,
+                ).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        error!("Mesh execution failed: {:?}", e);
+                        
+                        // Try fallback to coordinator if enabled
+                        if allow_fallback && self.coordinator.is_some() {
+                            info!("Attempting fallback to coordinator execution");
+                            
+                            let coord_result = self.coordinated_execute_with_type(
+                                input, 
+                                region_id,
+                                tee_type.clone(),
+                            ).await?;
+                            
+                            // Convert coordinator result to mesh result
+                            let attestations = coord_result.attestations.iter()
+                                .map(|a| crate::mesh::Attestation {
+                                    enclave_type: format!("{:?}", a.enclave_type),
+                                    measurement: a.measurement.clone(),
+                                    timestamp: a.timestamp as u64,
+                                    platform_data: vec![0, 1, 2, 3], // Placeholder
+                                })
+                                .collect();
+                                
+                            return Ok(MeshExecutionResult {
+                                result: coord_result.result,
+                                state_hash: vec![0; 32], // Placeholder hash for fallback
+                                execution_time_ns: 0, // Not available from coordinator
+                                network_latency_ns: 0, // Not available from coordinator
+                                attestations: Some(attestations),
+                                error: None,
+                                metrics: Some(crate::mesh::PerformanceMetrics {
+                                    tee_type: format!("{:?}", tee_type),
+                                    region_id: region_id.to_string(),
+                                    worker_id: "coordinator-fallback".to_string(),
+                                    latency_ms: start_time.elapsed().as_millis() as f64,
+                                    execution_time_ns: 0,
+                                    network_latency_ms: start_time.elapsed().as_millis() as f64,
+                                    success_count: 1,
+                                    failure_count: 0,
+                                    memory_used_bytes: 0,
+                                    syscall_count: 0,
+                                    throughput_bytes_ps: 0,
+                                    p50_execution_ms: Some(0),
+                                    p95_execution_ms: Some(0),
+                                    p99_execution_ms: Some(0),
+                                    max_execution_ms: Some(0),
+                                    avg_execution_ms: Some(0.0),
+                                    min_execution_ms: Some(0),
+                                    operations_per_second: Some(0),
+                                    batch_size: Some(1),
+                                    concurrent_operations: Some(1),
+                                    network_efficiency: Some(1.0),
+                                }),
+                                memory_used: 0,       // Not available from coordinator
+                                syscall_count: 0,     // Not available from coordinator
+                                cache_hit: false,
+                                cache_ttl_sec: None,
+                                execution_type: "fallback".to_string(),
+                                status: "completed-via-fallback".to_string(),
+                                operation_id: None,
+                            });
+                        }
+                        
+                        return Err(TeeError::ExecutionError(format!(
+                            "Mesh execution failed: {:?}", e
+                        )));
+                    }
+                }
+            },
+            None => {
+                return Err(TeeError::ExecutionError(
+                    "Mesh coordinator not initialized".to_string()
+                ));
+            }
+        };
+        
+        // Record metrics for the execution
+        self.metrics.record_execution(
+            &self.region_id,
+            match tee_type {
+                TeeType::SGX => "SGX",
+                TeeType::SEV => "SEV",
+            },
+            target_tee,
+            result.execution_time_ns as f64 / 1_000_000.0, // Convert ns to ms
+            true,  // Assume success if we get here
+            input.len() as u64,
+            result.result.len() as u64,
+        ).await;
+        
+        Ok(result)
+    }
+    
+    // Execute via coordinator with specific TEE type
+    async fn coordinated_execute_with_type(
+        &self,
+        input: &[u8],
+        region_id: &str,
+        tee_type: TeeType,
+    ) -> Result<ExecutionResult, TeeError> {
+        let payload = ExecutionPayload {
+            input: input.to_vec(),
+            params: ExecutionParams {
+                detailed_proof: true,
+                function_call: "execute".to_string(),
+                id_to: "default".to_string(),
+                expected_hash: Vec::new(), // Update to match the expected type
+            },
+            operation_id: Some(Uuid::new_v4().to_string()),
+            previous_operation_id: None,
+            operation_context: Some(format!("region:{},type:{:?}", region_id, tee_type).into_bytes()),
+        };
+        
+        self.coordinated_execute(&payload).await
+    }
+    
+    // Discover peers in the mesh network
+    pub async fn discover_peers(
+        &self,
+        region_id: &str,
+        tee_type: Option<TeeType>,
+        max_results: usize,
+    ) -> Result<Vec<PeerInfo>, TeeError> {
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            return Err(TeeError::ExecutionError("Mesh network is not enabled".to_string()));
+        }
+        
+        let coordinator = self.mesh_coordinator.as_ref().unwrap();
+        
+        match coordinator.discover_peers(
+            region_id.to_string(),
+            tee_type.map(|t| match t {
+                TeeType::SGX => "SGX".to_string(),
+                TeeType::SEV => "SEV".to_string(),
+            }),
+            max_results,
+        ).await {
+            Ok(peers) => Ok(peers),
+            Err(e) => Err(TeeError::ExecutionError(format!("Peer discovery failed: {:?}", e))),
+        }
+    }
+    
+    // Synchronize state with another TEE
+    pub async fn sync_state(
+        &self,
+        object_id: &str,
+        target_tee: &str,
+        use_deltas: bool,
+    ) -> Result<SyncResult, TeeError> {
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            return Err(TeeError::ExecutionError("Mesh network is not enabled".to_string()));
+        }
+        
+        let coordinator = self.mesh_coordinator.as_ref().unwrap();
+        
+        match coordinator.sync_state(
+            object_id.to_string(),
+            target_tee.to_string(),
+            use_deltas,
+        ).await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(TeeError::ExecutionError(format!("State sync failed: {:?}", e))),
+        }
+    }
+    
+    // Check if mesh should be used for execution based on the circuit breaker
+    async fn should_use_mesh(&self, region_id: &str, target_tee: &str) -> bool {
+        if !self.mesh_enabled || self.mesh_coordinator.is_none() {
+            return false;
+        }
+        
+        // If execution mode is explicitly set, follow that
+        match self.execution_mode {
+            ExecutionMode::Mesh => return true,
+            ExecutionMode::Coordinated => return false,
+            ExecutionMode::Direct => return false,
+            ExecutionMode::Auto => {
+                // Use metrics to determine if mesh should be used
+                if let Some(avg_latency) = self.metrics.get_average_latency(region_id, target_tee).await {
+                    // Only use mesh if the latency is below the circuit breaker threshold
+                    return avg_latency < self.circuit_breaker_threshold.as_millis() as f64;
+                }
+                
+                // Default to coordinator if no metrics available
+                false
+            }
+        }
+    }
+}
+
+impl HyperTeeController {
+    // Initialize policy manager with default policies
+    pub async fn initialize_policy_manager(&mut self) -> Result<(), TeeError> {
+        let policy_manager = SharedPolicyManager::new();
+        
+        // Create default policies for each region
+        let regions = self.get_regions().await.unwrap_or_default();
+        
+        for region in regions {
+            let region_id = region.id.clone();
+            
+            // Create a basic policy for the region with transaction limits
+            let mut region_policy = Policy::new(
+                region_id.as_str(),
+                "1.0",
+                Some(region_id.as_str())
+            );
+            
+            // Add default rules
+            // 1. Maximum transaction amount (in tokens)
+            region_policy.add_rule(PolicyRule::TransactionLimit {
+                max_amount: 1_000_000,
+                time_window_seconds: 3600,
+            });
+            
+            // 2. Limit transactions per hour
+            region_policy.add_rule(PolicyRule::RateLimiting {
+                max_transactions: 1000,
+                time_window_seconds: 3600,
+            });
+            
+            // 3. Add allowed contract types (example whitelist)
+            region_policy.add_rule(PolicyRule::AllowedContracts { 
+                contract_ids: vec!["payment_contract".to_string(), "token_contract".to_string()]
+            });
+            
+            // Add circuit breakers
+            // 1. Medium level circuit breaker for high transaction volume
+            region_policy.add_circuit_breaker(
+                CircuitBreaker {
+                    id: "high_volume".to_string(),
+                    level: CircuitBreakerLevel::Restricted,
+                    trigger_conditions: vec![
+                        TriggerCondition::TransactionVolume {
+                            threshold: 500,
+                            time_window_seconds: 60,
+                        }
+                    ],
+                    recovery_conditions: Some(vec![
+                        RecoveryCondition::TimeElapsed {
+                            seconds: 300,
+                        }
+                    ]),
+                    actions: vec![
+                        CircuitBreakerAction::LogWarning,
+                        CircuitBreakerAction::RejectSpecificContractCalls {
+                            contract_ids: vec!["high_risk_contract".to_string()],
+                        }
+                    ],
+                }
+            );
+            
+            // 2. High level circuit breaker for very high transaction values
+            region_policy.add_circuit_breaker(
+                CircuitBreaker {
+                    id: "high_value".to_string(),
+                    level: CircuitBreakerLevel::Critical,
+                    trigger_conditions: vec![
+                        TriggerCondition::TransactionVolume {
+                            threshold: 1_000_000,
+                            time_window_seconds: 60,
+                        }
+                    ],
+                    recovery_conditions: None, // Manual reset required
+                    actions: vec![
+                        CircuitBreakerAction::NotifyAdministrator {
+                            notification_method: "email".to_string(),
+                        },
+                        CircuitBreakerAction::RejectAllTransactions,
+                    ],
+                }
+            );
+            
+            // Add the policy to the policy manager
+            policy_manager.add_policy(region_policy).await;
+        }
+        
+        // Set the policy manager
+        self.policy_manager = Some(Arc::new(policy_manager));
+        
+        // Enable policy enforcement
+        self.policy_enforcement_enabled = true;
+        
+        Ok(())
+    }
+    
+    // Check if a transaction complies with policy
+    pub async fn check_policy_compliance(&self, transaction: &Transaction) -> Result<(), PolicyViolation> {
+        // If policy enforcement is not enabled, all transactions are allowed
+        if !self.policy_enforcement_enabled {
+            return Ok(());
+        }
+        
+        // If policy manager is not initialized, all transactions are allowed
+        if let Some(ref policy_manager) = self.policy_manager {
+            policy_manager.check_transaction(transaction).await
+        } else {
+            Ok(())
+        }
+    }
+    
+    // Reset circuit breaker
+    pub async fn reset_circuit_breaker(&self, region_id: &str, breaker_id: &str) -> Result<(), TeeError> {
+        if let Some(ref policy_manager) = self.policy_manager {
+            policy_manager.reset_circuit_breaker(region_id, breaker_id).await
+                .map_err(|e| TeeError::ExecutionError(format!("Failed to reset circuit breaker: {}", e)))
+        } else {
+            Err(TeeError::ExecutionError("Policy manager not initialized".to_string()))
+        }
+    }
+    
+    // Get current circuit breaker status
+    pub async fn get_circuit_breaker_status(&self, region_id: &str) -> Result<HashMap<String, bool>, TeeError> {
+        if let Some(ref policy_manager) = self.policy_manager {
+            Ok(policy_manager.get_circuit_breaker_status(region_id).await)
+        } else {
+            Err(TeeError::ExecutionError("Policy manager not initialized".to_string()))
+        }
+    }
+    
+    // Get a reference to the policy manager
+    pub async fn get_policy_manager(&self) -> Result<Arc<SharedPolicyManager>, TeeError> {
+        match &self.policy_manager {
+            Some(manager) => Ok(manager.clone()), // Clone the Arc to get a new reference
+            None => Err(TeeError::ExecutionError("Policy manager not initialized".to_string()))
+        }
     }
 }

@@ -11,6 +11,7 @@ use tracing::info as tracing_info;
 use serde::{Serialize, Deserialize};
 use tee_interface::{TeeError, types::RegionInfo as TeeRegionInfo};
 use tee_interface::types::TeeAttestation as AttestationReport;
+use crate::accumulator_client::{AccumulatorClientTrait, create_accumulator_client};
 
 /// Get the current timestamp in seconds
 fn current_timestamp() -> u64 {
@@ -253,7 +254,7 @@ pub struct DiscoveryService {
     mesh: Arc<MeshCoordinator>,
     
     /// Client for the accumulator service
-    accumulator_client: Arc<AccumulatorClient>,
+    accumulator_client: Arc<dyn AccumulatorClientTrait>,
     
     /// Cache of recently verified peers
     peer_cache: Arc<RwLock<HashMap<String, Instant>>>,
@@ -379,6 +380,15 @@ pub struct DiscoveryServiceConfig {
     
     /// Maximum number of hops for peer gossip
     pub max_gossip_hops: u32,
+    
+    /// Whether to use enhanced discovery (with accumulator)
+    pub enhanced_discovery: bool,
+    
+    /// Local identity for attestation (base64 encoded)
+    pub local_identity: Option<String>,
+    
+    /// Endpoint for the accumulator service
+    pub accumulator_endpoint: Option<String>,
 }
 
 impl Default for DiscoveryServiceConfig {
@@ -396,6 +406,9 @@ impl Default for DiscoveryServiceConfig {
             max_superpeers: 5,
             enable_gossip: true,
             max_gossip_hops: 2,
+            enhanced_discovery: false,
+            local_identity: None,
+            accumulator_endpoint: None,
         }
     }
 }
@@ -467,104 +480,6 @@ impl ConnectionStats {
     }
 }
 
-// Mock AccumulatorClient for discovery service integration
-// This will be replaced with actual implementation later
-#[derive(Debug, Clone)]
-pub struct AccumulatorClient {
-    // Mock fields
-    pub endpoint: String,
-}
-
-impl AccumulatorClient {
-    pub fn new() -> Self {
-        AccumulatorClient {
-            endpoint: "http://localhost:8080".to_string(),
-        }
-    }
-    
-    pub async fn register_peer(&self, _peer_id: &str, _region_id: &str) -> Result<(), String> {
-        // Mock implementation
-        Ok(())
-    }
-    
-    pub async fn get_peers_in_region(&self, _region_id: &str) -> Result<Vec<String>, String> {
-        // Mock implementation
-        Ok(Vec::new())
-    }
-    
-    pub async fn get_all_regions(&self) -> Result<Vec<DiscoveryRegionInfo>, String> {
-        // Mock implementation returning sample data
-        let regions = vec![
-            DiscoveryRegionInfo {
-                region_id: "us-west".to_string(),
-                executor_count: 5,
-                is_leaf: true,
-                parent_region: Some("us".to_string()),
-            },
-            DiscoveryRegionInfo {
-                region_id: "us-east".to_string(),
-                executor_count: 7,
-                is_leaf: true,
-                parent_region: Some("us".to_string()),
-            },
-            DiscoveryRegionInfo {
-                region_id: "us".to_string(),
-                executor_count: 12,
-                is_leaf: false,
-                parent_region: Some("global".to_string()),
-            },
-            DiscoveryRegionInfo {
-                region_id: "eu".to_string(),
-                executor_count: 8,
-                is_leaf: false,
-                parent_region: Some("global".to_string()),
-            },
-            DiscoveryRegionInfo {
-                region_id: "global".to_string(),
-                executor_count: 20,
-                is_leaf: false,
-                parent_region: None,
-            },
-        ];
-        
-        Ok(regions)
-    }
-    
-    pub async fn verify_peer(&self, _peer_id: &str) -> Result<bool, String> {
-        // Mock implementation 
-        Ok(true)
-    }
-    
-    pub async fn set_peer_locality(&self, _peer_id: &str, _locality: &LocalityInfoDto) -> Result<(), String> {
-        // Mock implementation
-        Ok(())
-    }
-    
-    pub async fn batch_verify_peers(&self, peers: &[String]) -> Result<Vec<bool>, String> {
-        // Mock implementation
-        let mut results = Vec::with_capacity(peers.len());
-        for _ in peers {
-            results.push(true);
-        }
-        Ok(results)
-    }
-    
-    pub async fn set_region_hierarchy(&self, _parent: &str, _child: &str) -> Result<(), String> {
-        // Mock implementation
-        Ok(())
-    }
-    
-    pub async fn get_peers_by_proximity(&self, _region_id: &str) -> Result<Vec<String>, String> {
-        // Mock implementation
-        Ok(Vec::new())
-    }
-    
-    pub async fn get_super_peers(&self, _region_id: &str) -> Result<Vec<String>, String> {
-        // Mock implementation
-        Ok(Vec::new())
-    }
-}
-
 impl DiscoveryService {
     /// Create a new discovery service with default parameters
     pub async fn new(mesh: Arc<MeshCoordinator>) -> Result<Arc<Self>, TeeError> {
@@ -578,12 +493,16 @@ impl DiscoveryService {
     ) -> Result<Arc<Self>, TeeError> {
         tracing_info!("Initializing discovery service with custom parameters");
         
-        // In a real implementation, we would initialize the accumulator contract
-        // with parameters for the discovery service
+        // Create an appropriate accumulator client based on configuration
+        let accumulator = create_accumulator_client(
+            params.enhanced_discovery,
+            params.accumulator_endpoint.as_deref(),
+            params.local_identity.as_deref()
+        );
         
         let service = Arc::new(Self {
             mesh,
-            accumulator_client: Arc::new(AccumulatorClient::new()),
+            accumulator_client: accumulator,
             peer_cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: 3600, // 1 hour
             max_batch_size: 100,
