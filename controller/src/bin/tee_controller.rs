@@ -706,7 +706,7 @@ async fn handle_execute_paired(
         },
         "coordinator" => {
             info!("Using coordinator-mediated execution path");
-            executor.execute_paired(
+            Some(executor.execute_paired(
                 wasm_module,
                 input,
                 contract_id,
@@ -716,7 +716,7 @@ async fn handle_execute_paired(
                 function_call,
             ).await.map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("Coordinator execution failed: {:?}", e))
-            })?
+            })?)
         },
         // "auto" or any other value
         _ => {
@@ -739,11 +739,11 @@ async fn handle_execute_paired(
             match executor.try_mesh_execution(&payload).await {
                 Ok(Some(result)) => {
                     info!("Mesh execution succeeded");
-                    result
+                    Some(result)
                 },
                 Ok(None) => {
                     info!("Falling back to coordinator execution");
-                    executor.execute_paired(
+                    Some(executor.execute_paired(
                         wasm_module,
                         input,
                         contract_id,
@@ -753,7 +753,7 @@ async fn handle_execute_paired(
                         function_call,
                     ).await.map_err(|e| {
                         std::io::Error::new(std::io::ErrorKind::Other, format!("Fallback execution failed: {:?}", e))
-                    })?
+                    })?)
                 },
                 Err(e) => {
                     error!("Mesh execution failed without fallback: {:?}", e);
@@ -764,7 +764,7 @@ async fn handle_execute_paired(
     };
     
     // Output result as JSON
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    println!("{}", serde_json::to_string_pretty(&result.unwrap()).unwrap());
     Ok(())
 }
 

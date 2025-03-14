@@ -41,6 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             operation_id: None,
             previous_operation_id: None,
             operation_context: None,
+            region_id: None,
+            target_tee: None,
+            tee_type: None,
+            allow_fallback: Some(true),
         };
         
         // Execute the payload

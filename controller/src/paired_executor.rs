@@ -1,13 +1,20 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use log::{info, error, debug, warn};
-use tee_interface::{TeeError, TeeExecutor, ExecutionPayload, ExecutionResult, TeeAttestation, RegionInfo};
-use async_trait::async_trait;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
-use chrono::Utc;
-use crate::mesh::{MeshCoordinator, MeshExecutionResult, PeerInfo, SyncResult, TeeType as MeshTeeType};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use log::{debug, error, info, warn};
+use tokio::sync::RwLock;
+use serde::{Serialize, Deserialize};
+
+use tee_interface::{
+    ExecutionPayload, ExecutionResult, ExecutionStats, TeeAttestation, TeeError, TeeExecutor, TeeType, RegionInfo
+};
+use crate::mesh::{MeshCoordinator, MeshExecutionResult, PeerInfo, SyncResult, TeeType as MeshTeeType};
+use crate::hyper_mesh_extension::MeshExecutionExtension;
 
 /// TeeExecutorPair combines two TeeExecutor instances
 /// for redundant execution and cross-checking results
@@ -38,6 +45,17 @@ struct MetricsData {
     last_execution: chrono::DateTime<Utc>,
 }
 
+impl MetricsData {
+    fn default() -> Self {
+        Self {
+            execution_times: VecDeque::with_capacity(100), // Keep last 100 execution times
+            success_count: 0,
+            failure_count: 0,
+            last_execution: Utc::now(),
+        }
+    }
+}
+
 /// Circuit breaker pattern for mesh execution
 struct CircuitBreakerState {
     /// Whether the circuit breaker is currently tripped
@@ -60,17 +78,6 @@ impl Default for CircuitBreakerState {
             failure_count: 0,
             reset_timeout_sec: 300, // 5 minutes default
             failure_threshold: 5,   // 5 consecutive failures
-        }
-    }
-}
-
-impl Default for MetricsData {
-    fn default() -> Self {
-        Self {
-            execution_times: VecDeque::with_capacity(100), // Keep last 100 execution times
-            success_count: 0,
-            failure_count: 0,
-            last_execution: Utc::now(),
         }
     }
 }
@@ -398,16 +405,16 @@ impl TeeExecutor for TeeExecutorPair {
                         // Create result with data from mesh execution
                         let attestations = mesh_result.attestations.unwrap_or_default().iter()
                             .map(|a| TeeAttestation {
-                                enclave_type: match a.enclave_type.as_str() {
-                                    "IntelSGX" => tee_interface::TeeType::SGX,
-                                    "SEV" => tee_interface::TeeType::SEV,
+                                enclave_type: match a.enclave_type.to_lowercase().as_str() {
+                                    "sgx" | "intelsgx" => tee_interface::TeeType::SGX,
+                                    "sev" => tee_interface::TeeType::SEV,
                                     _ => tee_interface::TeeType::SGX,
                                 },
-                                enclave_id: a.measurement.clone(), // Using measurement as enclave_id
                                 measurement: a.measurement.clone(),
                                 timestamp: a.timestamp,
                                 data: a.platform_data.clone(),
-                                signature: vec![],
+                                enclave_id: Vec::new(),
+                                signature: Vec::new(),
                                 region_proof: None,
                             })
                             .collect();
@@ -418,7 +425,10 @@ impl TeeExecutor for TeeExecutorPair {
                         // Update metrics with successful mesh execution data
                         let mut stats = tee_interface::ExecutionStats {
                             execution_time,
-                            ..Default::default()
+                            memory_used: mesh_result.memory_used,
+                            syscall_count: mesh_result.syscall_count,
+                            network_latency: mesh_result.network_latency_ns,
+                            custom_metrics: Some(HashMap::new()),
                         };
                         
                         // If mesh_result has metrics, populate stats with them
@@ -548,7 +558,296 @@ impl TeeExecutor for TeeExecutorPair {
     }
 }
 
-// Helper methods for metrics and circuit breaker management
+#[async_trait]
+impl MeshExecutionExtension for TeeExecutorPair {
+    async fn try_mesh_execution(&self, payload: &ExecutionPayload) -> Result<Option<ExecutionResult>, TeeError> {
+        // Don't attempt mesh execution if mesh coordinator is not available
+        let mesh_coordinator = match &self.mesh_coordinator {
+            Some(coordinator) => coordinator,
+            None => {
+                debug!("Mesh coordinator not available, skipping mesh execution");
+                return Ok(None);
+            }
+        };
+
+        // Extract target information
+        let region_id = payload.region_id.as_deref().unwrap_or("default");
+        let target_tee = match &payload.target_tee {
+            Some(tee) => tee.as_str(),
+            None => {
+                debug!("No target TEE specified, cannot use mesh execution");
+                return Ok(None);
+            }
+        };
+        
+        // Determine TEE type, default to "sgx" if not specified
+        let tee_type = payload.tee_type.as_deref().unwrap_or("sgx");
+
+        // Check if circuit breaker is tripped for this target
+        {
+            let circuit_breaker = self.mesh_circuit_breaker.read().await;
+            if circuit_breaker.is_tripped {
+                warn!("Circuit breaker tripped for mesh execution, skipping");
+                return Ok(None);
+            }
+        }
+
+        // Check if we should attempt mesh execution based on metrics and payload
+        if !self.should_attempt_mesh(payload).await {
+            debug!("Mesh execution not recommended based on metrics, skipping");
+            return Ok(None);
+        }
+
+        // Default mesh timeout (100ms target for sub-100ms communication)
+        let mesh_timeout = Duration::from_millis(100);
+        
+        // Execute via mesh network
+        debug!("Attempting mesh execution for {}/{}", region_id, target_tee);
+        let start_time = Instant::now();
+        
+        // Call the execute method with the correct parameters
+        match mesh_coordinator.execute(
+            target_tee.to_string(),
+            region_id.to_string(),
+            tee_type.to_string(),
+            payload.input.clone(),
+            mesh_timeout,
+            false, // synchronous execution for now
+            payload.allow_fallback.unwrap_or(true),
+        ).await {
+            Ok(mesh_result) => {
+                let duration = start_time.elapsed();
+                debug!("Mesh execution successful for {}/{} in {:?}", region_id, target_tee, duration);
+                
+                // Convert mesh result to execution result
+                let result = self.convert_mesh_result(mesh_result, payload);
+                
+                // Record metrics for successful mesh execution
+                self.record_mesh_success(region_id, target_tee, duration).await;
+                
+                // Return the execution result
+                Ok(Some(result))
+            },
+            Err(e) => {
+                let duration = start_time.elapsed();
+                warn!("Mesh execution failed for {}/{}: {} (after {:?})", 
+                     region_id, target_tee, e, duration);
+                
+                // Update circuit breaker
+                {
+                    let mut circuit_breaker = self.mesh_circuit_breaker.write().await;
+                    circuit_breaker.failure_count += 1;
+                    if circuit_breaker.failure_count >= circuit_breaker.failure_threshold {
+                        circuit_breaker.is_tripped = true;
+                        circuit_breaker.tripped_at = Some(Utc::now());
+                    }
+                }
+                
+                // If we failed quickly, we can try coordinator execution
+                // This supports our sub-100ms performance target by quickly falling back
+                if duration < Duration::from_millis(50) {
+                    debug!("Mesh execution failed quickly, will try coordinator");
+                    Ok(None)
+                } else {
+                    // If we've already spent significant time, propagate the error
+                    let region_id = payload.region_id.as_deref().unwrap_or("unknown");
+                    let target_tee = payload.target_tee.as_deref().unwrap_or("unknown");
+                    
+                    // Record the mesh failure
+                    self.record_mesh_failure(region_id, target_tee).await;
+                    
+                    // Return the original error as TeeError
+                    Err(TeeError::ExecutionError(format!("{}", e)))
+                }
+            }
+        }
+    }
+    
+    async fn should_attempt_mesh(&self, payload: &ExecutionPayload) -> bool {
+        // Check if mesh is enabled via coordinator presence
+        if self.mesh_coordinator.is_none() {
+            return false;
+        }
+        
+        // Check if the payload allows fallback
+        if payload.allow_fallback.unwrap_or(true) == false {
+            // If fallback is not allowed, we must use mesh execution
+            return true;
+        }
+        
+        // Check if target_tee is specified
+        if payload.target_tee.is_none() {
+            return false;
+        }
+        
+        // Get metrics to make the decision
+        let metrics = self.metrics_store.read().await;
+        
+        // Extract region and target TEE
+        let region_id = payload.region_id.as_deref().unwrap_or("default");
+        let target_tee = match &payload.target_tee {
+            Some(tee) => tee,
+            None => return false,
+        };
+        
+        // Look up metrics for this target
+        let metric_key = format!("{}/{}", region_id, target_tee);
+        if let Some(metrics_data) = metrics.get(&metric_key) {
+            // Check if mesh execution is historically faster
+            if metrics_data.is_mesh_faster_than_coordinator() {
+                return true;
+            }
+            
+            // Check if mesh execution has been reliable
+            if metrics_data.get_mesh_success_rate() > 0.9 {  // 90% success rate threshold
+                return true;
+            }
+        }
+        
+        // Default to using mesh if we have no metrics (experimental)
+        // This helps us gather metrics for new targets
+        true
+    }
+    
+    fn convert_mesh_result(&self, mesh_result: MeshExecutionResult, payload: &ExecutionPayload) -> ExecutionResult {
+        // Map MeshExecutionResult fields to ExecutionResult fields
+        let mut custom_metrics = HashMap::new();
+        
+        // Add mesh-specific metrics to custom_metrics
+        custom_metrics.insert("status".to_string(), mesh_result.status.clone());
+        custom_metrics.insert("cache_hit".to_string(), mesh_result.cache_hit.to_string());
+        custom_metrics.insert("execution_type".to_string(), mesh_result.execution_type.clone());
+        custom_metrics.insert("network_latency_ns".to_string(), mesh_result.network_latency_ns.to_string());
+        
+        // Add optional worker metrics if available
+        if let Some(metrics) = &mesh_result.metrics {
+            custom_metrics.insert("worker_id".to_string(), metrics.worker_id.clone());
+            custom_metrics.insert("region_id".to_string(), metrics.region_id.clone());
+            custom_metrics.insert("tee_type".to_string(), metrics.tee_type.clone());
+        }
+        
+        ExecutionResult {
+            result: mesh_result.result,
+            state_hash: mesh_result.state_hash,
+            stats: ExecutionStats {
+                execution_time: mesh_result.execution_time_ns,
+                memory_used: mesh_result.memory_used,
+                syscall_count: mesh_result.syscall_count,
+                network_latency: mesh_result.network_latency_ns,
+                custom_metrics: Some(custom_metrics),
+            },
+            attestations: mesh_result.attestations
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| TeeAttestation {
+                    enclave_type: match a.enclave_type.to_lowercase().as_str() {
+                        "sgx" | "intelsgx" => tee_interface::TeeType::SGX,
+                        "sev" => tee_interface::TeeType::SEV,
+                        _ => tee_interface::TeeType::SGX, // Default to SGX if unknown
+                    },
+                    measurement: a.measurement.clone(),
+                    timestamp: a.timestamp,
+                    data: a.platform_data.clone(),
+                    enclave_id: Vec::new(),
+                    signature: Vec::new(),
+                    region_proof: None,
+                })
+                .collect(),
+            timestamp: Utc::now().to_rfc3339(),
+            operation_status: Some("completed".to_string()),
+            operation_id: Some(mesh_result.operation_id.unwrap_or_else(|| 
+                payload.operation_id.clone().unwrap_or_else(|| Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string()))),
+            pending_operations: Some(Vec::new()),
+        }
+    }
+    
+    async fn record_mesh_failure(&self, payload: &ExecutionPayload, error_msg: &str) -> TeeError {
+        // Log the failure for metrics purposes
+        warn!("Mesh execution failed for operation {}: {}", 
+              payload.operation_id.as_deref().unwrap_or("unknown"), error_msg);
+        
+        // Create and return a formatted error
+        TeeError::ExecutionError(format!(
+            "Mesh execution failed: {}. Operation ID: {}", 
+            error_msg,
+            payload.operation_id.as_deref().unwrap_or("unknown")
+        ))
+    }
+}
+
+impl TeeExecutorPair {
+    // Helper method to record successful mesh execution metrics
+    async fn record_mesh_success(&self, region_id: &str, target_tee: &str, duration: Duration) {
+        let mut metrics = self.metrics_store.write().await;
+        let metric_key = format!("{}/{}", region_id, target_tee);
+        
+        let metrics_data = metrics.entry(metric_key.clone()).or_insert_with(|| MetricsData::default());
+        
+        // Record successful execution
+        metrics_data.execution_times.push_back(duration.as_millis() as u64);
+        metrics_data.success_count += 1;
+        metrics_data.last_execution = Utc::now();
+        
+        // Keep only the most recent measurements
+        if metrics_data.execution_times.len() > 100 {
+            metrics_data.execution_times.pop_front();
+        }
+        
+        // Reset circuit breaker for successful executions
+        {
+            let mut circuit_breaker = self.mesh_circuit_breaker.write().await;
+            circuit_breaker.is_tripped = false;
+            circuit_breaker.failure_count = 0;
+        }
+    }
+    
+    // Helper method to record failed mesh execution metrics
+    async fn record_mesh_failure(&self, region_id: &str, target_tee: &str) {
+        let mut metrics = self.metrics_store.write().await;
+        let metric_key = format!("{}/{}", region_id, target_tee);
+
+        let metrics_data = metrics.entry(metric_key.clone()).or_insert_with(|| MetricsData::default());
+
+        // Record failed execution
+        metrics_data.failure_count += 1;
+        metrics_data.last_execution = Utc::now();
+    }
+}
+
+/// Metrics data structure to help with routing decisions
+impl MetricsData {
+    // Check if mesh execution is historically faster than coordinator
+    fn is_mesh_faster_than_coordinator(&self) -> bool {
+        // This would compare mesh execution times with coordinator times
+        // For now, use a simplified heuristic
+        if self.execution_times.len() < 5 {
+            return false; // Not enough data
+        }
+        
+        // Calculate average execution time
+        let sum: u64 = self.execution_times.iter().sum();
+        let avg = sum / self.execution_times.len() as u64;
+        
+        // If average execution time is under 50ms, prefer mesh
+        avg < 50
+    }
+    
+    // Get success rate for mesh execution
+    fn get_mesh_success_rate(&self) -> f64 {
+        let total = self.success_count + self.failure_count;
+        if total == 0 {
+            return 1.0; // No data yet, assume perfect
+        }
+        self.success_count as f64 / total as f64
+    }
+}
+
+/// Circuit breaker state to prevent repeated failures
+impl CircuitBreakerState {
+    fn is_tripped(&self) -> bool {
+        self.is_tripped
+    }
+}
 
 /// Update performance metrics for a specific execution path
 async fn update_metrics(
@@ -560,7 +859,7 @@ async fn update_metrics(
     let mut metrics_store = executor.metrics_store.write().await;
     
     let entry = metrics_store.entry(key.to_string())
-        .or_insert_with(MetricsData::default);
+        .or_insert_with(|| MetricsData::default());
     
     // Update success/failure counts
     if success {
@@ -675,7 +974,7 @@ async fn record_metrics_failure(executor: &TeeExecutorPair, key: &str) {
     let mut metrics_store = executor.metrics_store.write().await;
     
     let entry = metrics_store.entry(key.to_string())
-        .or_insert_with(MetricsData::default);
+        .or_insert_with(|| MetricsData::default());
     
     entry.failure_count += 1;
 }
