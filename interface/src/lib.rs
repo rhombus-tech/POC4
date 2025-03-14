@@ -5,12 +5,17 @@ use thiserror::Error;
 pub mod types {
     use super::*;
     use std::fmt;
+    use std::collections::HashMap;
 
     #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
     pub struct ExecutionStats {
         pub execution_time: u64,
         pub memory_used: u64,
         pub syscall_count: u64,
+        /// Network latency in milliseconds (for mesh execution)
+        pub network_latency: u64,
+        /// Map of custom metrics for extensibility
+        pub custom_metrics: Option<HashMap<String, String>>,
     }
 
     impl Default for ExecutionStats {
@@ -19,6 +24,8 @@ pub mod types {
                 execution_time: 0,
                 memory_used: 0,
                 syscall_count: 0,
+                network_latency: 0,
+                custom_metrics: None,
             }
         }
     }
@@ -49,6 +56,14 @@ pub mod types {
         pub operation_id: Option<String>,
         pub previous_operation_id: Option<String>,
         pub operation_context: Option<Vec<u8>>,
+        /// Target region ID for execution
+        pub region_id: Option<String>,
+        /// Target TEE ID for mesh execution
+        pub target_tee: Option<String>,
+        /// TEE type for execution (e.g., "IntelSGX", "SEV")
+        pub tee_type: Option<String>,
+        /// Whether to allow fallback to alternative execution paths
+        pub allow_fallback: Option<bool>,
     }
 
     impl Default for ExecutionPayload {
@@ -59,6 +74,10 @@ pub mod types {
                 operation_id: None,
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: None,
+                target_tee: None,
+                tee_type: None,
+                allow_fallback: Some(true),
             }
         }
     }

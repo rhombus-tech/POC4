@@ -1,0 +1,110 @@
+    async fn try_mesh_execution(&self, payload: &ExecutionPayload) -> Result<Option<ExecutionResult>, TeeError> {
+        // Don't attempt mesh execution if it's disabled
+        if !self.get_mesh_enabled() {
+            debug!("Mesh execution disabled, skipping");
+            return Ok(None);
+        }
+        
+        // Extract target information
+        let region_id = payload.region_id.as_deref().unwrap_or_else(|| self.get_region_id());
+        let target_tee = match &payload.target_tee {
+            Some(tee) => tee.as_str(),
+            None => {
+                debug!("No target TEE specified, cannot use mesh execution");
+                return Ok(None);
+            }
+        };
+        
+        // Check if mesh execution is appropriate for this target
+        if !<Self as TeeControllerUtils>::is_use_mesh_appropriate(self, region_id, target_tee).await {
+            debug!("Mesh execution not appropriate for {}/{}, skipping", region_id, target_tee);
+            return Ok(None);
+        }
+        
+        // Check if the circuit breaker is tripped for this target
+        if self.get_metrics().is_circuit_breaker_tripped(region_id, target_tee).await {
+            warn!("Circuit breaker tripped for {}/{}, skipping mesh execution", region_id, target_tee);
+            return Ok(None);
+        }
+        
+        // Serialize the payload for mesh execution
+        let payload_bytes = match bincode::serialize(payload) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!("Failed to serialize payload for mesh execution: {}", e);
+                return Ok(None); // Continue with coordinator execution
+            }
+        };
+        
+        // Get the mesh timeout from configuration or use a default
+        let mesh_timeout = Duration::from_millis(self.get_mesh_timeout_ms());
+        
+        // Execute via mesh network
+        debug!("Attempting mesh execution for {}/{}", region_id, target_tee);
+        let start_time = Instant::now();
+        
+        match self.execute_mesh_operation(target_tee, region_id, &payload_bytes, mesh_timeout).await {
+            Ok(mesh_result) => {
+                let duration = start_time.elapsed();
+                debug!("Mesh execution successful for {}/{} in {:?}", region_id, target_tee, duration);
+                
+                // Convert mesh result to execution result
+                let result = self.convert_mesh_result(mesh_result, payload);
+                
+                // Record metrics for successful mesh execution
+                self.record_mesh_success(payload, &result).await;
+                
+                // Return the execution result
+                Ok(Some(result))
+            },
+            Err(e) => {
+                let duration = start_time.elapsed();
+                warn!("Mesh execution failed for {}/{}: {} (after {:?})", 
+                     region_id, target_tee, e, duration);
+                
+                // Increment circuit breaker counter
+                self.get_metrics().increment_circuit_breaker_failures(region_id, target_tee).await
+                    .unwrap_or_else(|err| warn!("Failed to increment circuit breaker: {}", err));
+                
+                // Record metrics for failed mesh execution if we should still try coordinator
+                if duration < Duration::from_millis(self.get_mesh_timeout_ms() / 2) {
+                    // If we failed quickly, we can try coordinator execution
+                    debug!("Mesh execution failed quickly, will try coordinator");
+                    Ok(None)
+                } else {
+                    // If we've already spent significant time, propagate the error
+                    Err(self.record_mesh_failure(payload, &format!("{}", e)).await)
+                }
+            }
+        }
+    }
+    
+    async fn should_attempt_mesh(&self, payload: &ExecutionPayload) -> bool {
+        // First check if mesh is enabled globally
+        if !self.get_mesh_enabled() {
+            return false;
+        }
+        
+        // Check if we have a mesh coordinator
+        if self.get_mesh_coordinator().is_none() {
+            return false;
+        }
+        
+        // Get target information
+        let region_id = payload.region_id.as_deref().unwrap_or_else(|| self.get_region_id());
+        let target_tee = match &payload.target_tee {
+            Some(tee) => tee.as_str(),
+            None => return false, // Need target TEE for mesh execution
+        };
+        
+        // Check if this is an appropriate target for mesh execution
+        if !<Self as TeeControllerUtils>::is_use_mesh_appropriate(self, region_id, target_tee).await {
+            return false;
+        }
+        
+        // Check circuit breaker status
+        match self.get_metrics().is_circuit_breaker_tripped(region_id, target_tee).await {
+            true => false, // Circuit breaker is tripped, don't use mesh
+            false => true, // All checks passed, can attempt mesh execution
+        }
+    }

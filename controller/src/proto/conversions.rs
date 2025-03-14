@@ -11,6 +11,8 @@ pub fn to_interface_execution_result(proto: &ProtoResult) -> InterfaceResult {
             execution_time: proto.execution_time,
             memory_used: proto.memory_used,
             syscall_count: proto.syscall_count,
+            network_latency: 0, // Not available in protobuf yet
+            custom_metrics: None, // Not available in protobuf yet
         },
         attestations: proto.attestations.iter().map(to_interface_attestation).collect(),
         timestamp: proto.timestamp.clone(),

@@ -84,6 +84,8 @@ mod tests {
                 execution_time: 1000,
                 memory_used: 1024,
                 syscall_count: 10,
+                custom_metrics: None,
+                network_latency: 0,
             },
         };
 

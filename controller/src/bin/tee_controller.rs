@@ -8,6 +8,7 @@ use tee_interface::TeeType as InterfaceTeeType;
 use tee_controller::mesh::{MeshConfig, MeshCoordinator, TeeType as MeshTeeType};
 use tee_controller::paired_executor::TeeExecutorPair;
 use tee_controller::server::TeeServer;
+use tee_controller::MeshExecutionExtension;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
@@ -43,6 +44,10 @@ struct Args {
     /// Preferred TEE type for execution (sgx or sev)
     #[clap(long, default_value = "sgx")]
     tee_type: String,
+
+    /// Execution mode for HyperTeeController (auto, mesh, coordinator, direct)
+    #[clap(long, default_value = "auto")]
+    execution_mode: String,
 
     /// Peer discovery endpoint
     #[clap(long, default_value = "localhost:50052")]
@@ -245,6 +250,10 @@ async fn main() -> Result<(), std::io::Error> {
     }
     
     info!("Starting TEE Controller with base directory: {:?}", args.base_dir);
+    
+    // Set the execution mode environment variable based on CLI parameter
+    std::env::set_var("TEE_EXECUTION_MODE", &args.execution_mode);
+    info!("Setting execution mode to: {}", args.execution_mode);
     
     // Create the SGX and SEV TEE executors
     let sgx_controller = match EnarxController::new(
@@ -667,30 +676,96 @@ async fn handle_execute_paired(
         }
     };
     
-    let result = executor.execute_paired(
-        wasm_module,
-        input,
-        contract_id,
-        operation_id,
-        timeout,
-        use_cache,
-        function_call,
-    ).await;
+    // Get the execution mode from environment if not set in CLI
+    let execution_mode = std::env::var("TEE_EXECUTION_MODE").unwrap_or_else(|_| "auto".to_string());
     
-    match result {
-        Ok(result) => {
-            // Output result as JSON
-            println!("{}", serde_json::to_string_pretty(&result).unwrap());
-            Ok(())
+    let result = match execution_mode.to_lowercase().as_str() {
+        "mesh" => {
+            info!("Using mesh execution path");
+            // Create an execution payload with mesh-specific fields
+            let payload = tee_interface::ExecutionPayload {
+                input: input.clone(),
+                params: tee_interface::types::ExecutionParams {
+                    id_to: contract_id.clone(),
+                    function_call: function_call.clone().unwrap_or_else(|| "execute".to_string()),
+                    ..Default::default()
+                },
+                operation_id: Some(operation_id.clone()),
+                // Use mesh-specific fields
+                target_tee: None, // Will be automatically selected based on routing
+                region_id: None,  // Will use the default region from TeeExecutorPair
+                tee_type: None,   // Will use the default TEE type
+                allow_fallback: Some(true), // Allow fallback to coordinator if mesh fails
+                ..Default::default()
+            };
+            
+            // Use the MeshExecutionExtension trait to attempt mesh execution first
+            executor.try_mesh_execution(&payload).await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("Mesh execution failed: {:?}", e))
+            })?
         },
-        Err(e) => {
-            error!("Paired execution failed: {:?}", e);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Paired execution error: {:?}", e)
-            ))
+        "coordinator" => {
+            info!("Using coordinator-mediated execution path");
+            executor.execute_paired(
+                wasm_module,
+                input,
+                contract_id,
+                operation_id,
+                timeout,
+                use_cache,
+                function_call,
+            ).await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("Coordinator execution failed: {:?}", e))
+            })?
+        },
+        // "auto" or any other value
+        _ => {
+            info!("Using automatic execution path selection (mesh with coordinator fallback)");
+            // Create an execution payload with mesh-specific fields
+            let payload = tee_interface::ExecutionPayload {
+                input: input.clone(),
+                params: tee_interface::types::ExecutionParams {
+                    id_to: contract_id.clone(),
+                    function_call: function_call.clone().unwrap_or_else(|| "execute".to_string()),
+                    ..Default::default()
+                },
+                operation_id: Some(operation_id.clone()),
+                // Settings for automatic path selection
+                allow_fallback: Some(true), // Allow fallback to coordinator if mesh fails
+                ..Default::default()
+            };
+            
+            // Try mesh execution first, fall back to coordinator if needed
+            match executor.try_mesh_execution(&payload).await {
+                Ok(Some(result)) => {
+                    info!("Mesh execution succeeded");
+                    result
+                },
+                Ok(None) => {
+                    info!("Falling back to coordinator execution");
+                    executor.execute_paired(
+                        wasm_module,
+                        input,
+                        contract_id,
+                        operation_id,
+                        timeout,
+                        use_cache,
+                        function_call,
+                    ).await.map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, format!("Fallback execution failed: {:?}", e))
+                    })?
+                },
+                Err(e) => {
+                    error!("Mesh execution failed without fallback: {:?}", e);
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Execution failed: {:?}", e)));
+                }
+            }
         }
-    }
+    };
+    
+    // Output result as JSON
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    Ok(())
 }
 
 async fn handle_verify_platforms(

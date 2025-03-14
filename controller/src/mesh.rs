@@ -1900,4 +1900,22 @@ impl MeshCoordinator {
         self.connection_pool.mark_connection_healthy(peer_id, region_id, &tee_type_enum, latency_ms);
         Ok(())
     }
+    
+    /// Check if a specific peer exists in the given region
+    pub fn has_peer(&self, peer_id: &str, region_id: &str) -> bool {
+        // Try to acquire read lock on peers
+        match self.peers.try_read() {
+            Ok(peers) => {
+                // Check if the peer exists with the specified region
+                if let Some(peer) = peers.get(peer_id) {
+                    return peer.region_id == region_id;
+                }
+                false
+            },
+            Err(_) => {
+                // If we can't acquire the lock, assume the peer doesn't exist
+                false
+            }
+        }
+    }
 }

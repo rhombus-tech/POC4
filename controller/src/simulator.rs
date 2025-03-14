@@ -289,6 +289,8 @@ impl TeeExecutor for SimulatorController {
                 execution_time: 0,
                 memory_used: 0,
                 syscall_count: 0,
+                network_latency: 0,
+                custom_metrics: None,
             },
             attestations: vec![TeeAttestation {
                 enclave_id: b"simulator".to_vec(),

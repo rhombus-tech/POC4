@@ -15,9 +15,10 @@ use crate::coordinator_client::CoordinatorClient;
 use std::env;
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
-use log::{info, error};
+use log::{info, error, debug, warn};
 use crate::mesh::{MeshCoordinator, MeshConfig, MeshExecutionResult, PeerInfo, SyncResult};
 use crate::policy::{SharedPolicyManager, Policy, PolicyRule, Transaction, PolicyViolation, CircuitBreaker, CircuitBreakerLevel, TriggerCondition, RecoveryCondition, CircuitBreakerAction};
+use crate::hyper_mesh_extension::MeshExecutionExtension;
 
 // Define a constant for default gas limits
 const DEFAULT_GAS: u64 = 1_000_000;
@@ -75,15 +76,16 @@ pub struct HyperTeeController {
     region_tee_pairs: Arc<RwLock<HashMap<String, Vec<String>>>>,
     
     // Metrics and routing
-    metrics: Arc<crate::metrics::MetricsStore>,
+    pub metrics: Arc<crate::metrics::MetricsStore>,
     routing_strategy: Option<Arc<crate::metrics::RoutingStrategy>>,
-    region_id: String,
-    tee_type: String,
+    pub region_id: String,
+    pub tee_type: String,
     
     // Mesh network integration
-    mesh_coordinator: Option<Arc<MeshCoordinator>>,
-    mesh_enabled: bool,
-    circuit_breaker_threshold: Duration,
+    pub mesh_coordinator: Option<Arc<MeshCoordinator>>,
+    pub mesh_enabled: bool,
+    pub circuit_breaker_threshold: Duration,
+    pub mesh_timeout_ms: u64,
     
     // Policy enforcement
     policy_manager: Option<Arc<SharedPolicyManager>>,
@@ -184,7 +186,7 @@ impl HyperTeeController {
             };
             
             match MeshCoordinator::new(mesh_config).await {
-                Ok(coordinator) => Some(Arc::new(coordinator)), 
+                Ok(coordinator) => Some(coordinator), 
                 Err(e) => {
                     error!("Failed to initialize mesh coordinator: {:?}", e);
                     None
@@ -215,6 +217,7 @@ impl HyperTeeController {
             mesh_coordinator,
             mesh_enabled,
             circuit_breaker_threshold,
+            mesh_timeout_ms: circuit_breaker_threshold_ms,
             policy_manager: None,
             policy_enforcement_enabled: false,
         }
@@ -1097,28 +1100,7 @@ impl HyperTeeController {
         }
     }
 
-    // Generate a test attestation for testing purposes
-    fn generate_test_attestation(&self, payload: &ExecutionPayload, result: &[u8]) -> Vec<u8> {
-        // Create a simple attestation that includes hashes of input and output
-        let mut hasher = Sha256::new();
-        
-        // Add payload data to hash
-        hasher.update(&payload.input);
-        
-        // Fixed - use proper field names that exist in ExecutionParams
-        hasher.update(payload.params.function_call.as_bytes());
-        
-        // Add result to hash
-        hasher.update(result);
-        
-        // Return the hash as the attestation
-        hasher.finalize().to_vec()
-    }
-
-    async fn execute(
-        &self,
-        payload: &ExecutionPayload,
-    ) -> Result<ExecutionResult, TeeError> {
+    async fn execute(&self, payload: &ExecutionPayload) -> Result<ExecutionResult, TeeError> {
         // Check policy compliance for the execution payload
         if self.policy_enforcement_enabled {
             if let Some(ref policy_manager) = self.policy_manager {
@@ -1159,7 +1141,6 @@ impl HyperTeeController {
             }
         }
         
-        // Record start time for stats
         let start_time = std::time::Instant::now();
         
         // Check if we should use coordinated mode or direct mode
@@ -1211,6 +1192,7 @@ impl HyperTeeController {
             mesh_coordinator: self.mesh_coordinator.clone(),
             mesh_enabled: self.mesh_enabled,
             circuit_breaker_threshold: self.circuit_breaker_threshold,
+            mesh_timeout_ms: self.mesh_timeout_ms,
             policy_manager: self.policy_manager.clone(),
             policy_enforcement_enabled: self.policy_enforcement_enabled,
         };
@@ -1330,6 +1312,8 @@ impl HyperTeeController {
                         execution_time: execution_time_ms,
                         memory_used: 0,
                         syscall_count: 0,
+                        custom_metrics: None,
+                        network_latency: 0,
                     },
                     attestations: vec![TeeAttestation {
                         enclave_id: vec![104, 121, 114, 101, 114], // "hyper" in ASCII
@@ -1444,6 +1428,27 @@ impl TeeExecutor for HyperTeeController {
             }
         }
         
+        // Phase 3 enhancement: Try mesh execution first if appropriate
+        debug!("Checking if mesh execution is appropriate for operation ID: {}", 
+              payload.operation_id.as_deref().unwrap_or("unknown"));
+        
+        match <Self as MeshExecutionExtension>::try_mesh_execution(self, payload).await {
+            Ok(Some(result)) => {
+                // Successfully executed via mesh network
+                info!("Successfully executed operation via mesh network");
+                return Ok(result);
+            }
+            Ok(None) => {
+                // Mesh execution was not appropriate or not enabled
+                debug!("Mesh execution not used for this operation, continuing with regular flow");
+            }
+            Err(e) => {
+                // Mesh execution failed with an error, falling back to coordinator path
+                warn!("Mesh execution attempt failed: {}, falling back to coordinator path", e);
+                // Fall through to coordinator path
+            }
+        }
+
         // When using coordinator, submit task to coordinator
         if let Ok(use_coordinator) = env::var("USE_COORDINATOR") {
             if use_coordinator == "true" {
@@ -1502,6 +1507,8 @@ impl TeeExecutor for HyperTeeController {
                                                 execution_time: 0,
                                                 memory_used: 0,
                                                 syscall_count: 0,
+                                                custom_metrics: None,
+                                                network_latency: 0,
                                             },
                                             attestations: vec![attestation],
                                             timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1577,6 +1584,8 @@ impl TeeExecutor for HyperTeeController {
                         execution_time: 0,
                         memory_used: 0,
                         syscall_count: 0,
+                        custom_metrics: None,
+                        network_latency: 0,
                     },
                     attestations: vec![],
                     timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1605,6 +1614,8 @@ impl TeeExecutor for HyperTeeController {
                                 execution_time: 0,
                                 memory_used: 0,
                                 syscall_count: 0,
+                                custom_metrics: None,
+                                network_latency: 0,
                             },
                             attestations: vec![],
                             timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1627,6 +1638,8 @@ impl TeeExecutor for HyperTeeController {
                                     execution_time: 0,
                                     memory_used: 0,
                                     syscall_count: 0,
+                                    custom_metrics: None,
+                                    network_latency: 0,
                                 },
                                 attestations: vec![],
                                 timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1643,6 +1656,8 @@ impl TeeExecutor for HyperTeeController {
                                     execution_time: 0,
                                     memory_used: 0,
                                     syscall_count: 0,
+                                    custom_metrics: None,
+                                    network_latency: 0,
                                 },
                                 attestations: vec![],
                                 timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1671,6 +1686,8 @@ impl TeeExecutor for HyperTeeController {
                         execution_time: 0,
                         memory_used: 0,
                         syscall_count: 0,
+                        custom_metrics: None,
+                        network_latency: 0,
                     },
                     attestations: vec![],
                     timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1696,6 +1713,8 @@ impl TeeExecutor for HyperTeeController {
                         execution_time: 0,
                         memory_used: 0,
                         syscall_count: 0,
+                        custom_metrics: None,
+                        network_latency: 0,
                     },
                     attestations: vec![],
                     timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1716,6 +1735,8 @@ impl TeeExecutor for HyperTeeController {
                         execution_time: 0,
                         memory_used: 0,
                         syscall_count: 0,
+                        custom_metrics: None,
+                        network_latency: 0,
                     },
                     attestations: vec![],
                     timestamp: chrono::Utc::now().timestamp().to_string(),
@@ -1765,9 +1786,59 @@ impl TeeExecutor for HyperTeeController {
 }
 
 impl HyperTeeController {
-    // Getter for worker_id
+    /// Returns whether mesh execution is enabled for this controller
+    pub fn get_mesh_enabled(&self) -> bool {
+        self.mesh_enabled
+    }
+    
+    /// Returns the region ID of this controller
+    pub fn get_region_id(&self) -> &str {
+        &self.region_id
+    }
+    
+    /// Returns a reference to the metrics store
+    pub fn get_metrics(&self) -> &Arc<crate::metrics::MetricsStore> {
+        &self.metrics
+    }
+    
+    /// Returns a reference to the mesh coordinator if it exists
+    pub fn get_mesh_coordinator(&self) -> Option<&Arc<MeshCoordinator>> {
+        self.mesh_coordinator.as_ref()
+    }
+    
+    /// Returns the mesh timeout in milliseconds
+    pub fn get_mesh_timeout_ms(&self) -> u64 {
+        self.circuit_breaker_threshold.as_millis() as u64
+    }
+
+    /// Returns the worker ID of this controller
     pub fn get_worker_id(&self) -> &str {
         &self.worker_id
+    }
+
+    /// Configure the circuit breaker threshold for the controller
+    pub fn with_circuit_breaker_threshold(mut self, threshold_ms: u64) -> Self {
+        self.circuit_breaker_threshold = Duration::from_millis(threshold_ms);
+        self.mesh_timeout_ms = threshold_ms;
+        self
+    }
+
+    // Generate a test attestation for development and testing purposes
+    fn generate_test_attestation(&self, payload: &ExecutionPayload, result: &[u8]) -> Vec<u8> {
+        // Create a simple attestation that includes hashes of input and output
+        let mut hasher = Sha256::new();
+        
+        // Add payload data to hash
+        hasher.update(&payload.input);
+        
+        // Add function call to hash
+        hasher.update(payload.params.function_call.as_bytes());
+        
+        // Add result to hash
+        hasher.update(result);
+        
+        // Return the hash as the attestation
+        hasher.finalize().to_vec()
     }
 
     // Handle potential state conflicts between TEE pairs
@@ -1978,8 +2049,8 @@ impl HyperTeeController {
                                 attestations: Some(attestations),
                                 error: None,
                                 metrics: Some(crate::mesh::PerformanceMetrics {
-                                    tee_type: format!("{:?}", tee_type),
-                                    region_id: region_id.to_string(),
+                                    tee_type: format!("{:?}", tee_type).into(),
+                                    region_id: Some(region_id.to_string()),
                                     worker_id: "coordinator-fallback".to_string(),
                                     latency_ms: start_time.elapsed().as_millis() as f64,
                                     execution_time_ns: 0,
@@ -1999,6 +2070,7 @@ impl HyperTeeController {
                                     batch_size: Some(1),
                                     concurrent_operations: Some(1),
                                     network_efficiency: Some(1.0),
+                                    custom_metrics: std::collections::HashMap::new(),
                                 }),
                                 memory_used: 0,       // Not available from coordinator
                                 syscall_count: 0,     // Not available from coordinator
@@ -2053,11 +2125,15 @@ impl HyperTeeController {
                 detailed_proof: true,
                 function_call: "execute".to_string(),
                 id_to: "default".to_string(),
-                expected_hash: Vec::new(), // Update to match the expected type
+                expected_hash: Vec::new(), // Empty vector for expected hash
             },
             operation_id: Some(Uuid::new_v4().to_string()),
             previous_operation_id: None,
             operation_context: Some(format!("region:{},type:{:?}", region_id, tee_type).into_bytes()),
+            allow_fallback: Some(true),
+            region_id: Some(region_id.to_string()),
+            target_tee: Some(format!("{:?}", tee_type)),
+            tee_type: format!("{:?}", tee_type).into(),
         };
         
         self.coordinated_execute(&payload).await

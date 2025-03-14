@@ -1,0 +1,166 @@
+        let function_call = payload.params.function_call.clone();
+        let id_to = payload.params.id_to.clone();
+        let input = &payload.input;
+        
+        info!("Executing directly with function: {}", function_call);
+        
+        // Execute based on the function call
+        let result = match function_call.as_str() {
+            "execute_async" => {
+                // Async execution path
+                let op_id = Uuid::new_v4().to_string();
+                let op_id_for_return = op_id.clone();
+                
+                // Store the operation in our state
+                let op_state = AsyncOperationState {
+                    id: op_id.clone(),
+                    status: "pending".to_string(),
+                    result: None,
+                    context: Some(input.clone()),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+                
+                {
+                    let mut ops = self.operations.write().await;
+                    ops.insert(op_id.clone(), op_state);
+                }
+                
+                // Spawn a task to execute in the background
+                let self_clone = self.clone();
+                let payload_clone = payload.clone();
+                let input_clone = input.clone();
+                
+                tokio::spawn(async move {
+                    // Execute the contract
+                    match self_clone.execute_synchronously(&payload_clone, "execute", &input_clone).await {
+                        Ok(result_data) => {
+                            // Update the operation state with success
+                            let mut ops = self_clone.operations.write().await;
+                            if let Some(op) = ops.get_mut(&op_id) {
+                                op.status = "completed".to_string();
+                                
+                                // Clone result_data to avoid move issues
+                                let result_data_clone = result_data.clone();
+                                
+                                // Create ExecutionResult and serialize it to Vec<u8>
+                                let execution_result = ExecutionResult {
+                                    result: result_data,
+                                    state_hash: Vec::new(),
+                                    stats: ExecutionStats {
+                                        execution_time: 0, // Filled in by metrics tracking
+                                        syscall_count: 0,
+                                        memory_used: 0,
+                                        network_latency: 0,
+                                        custom_metrics: None,
+                                    },
+                                    attestations: Vec::new(),
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    operation_status: None,
+                                    operation_id: payload_clone.operation_id.clone(),
+                                    pending_operations: None,
+                                };
+                                
+                                // Serialize to JSON first for easy storage/retrieval
+                                if let Ok(json_result) = serde_json::to_vec(&execution_result) {
+                                    op.result = Some(json_result);
+                                } else {
+                                    // Fallback - store just the result data
+                                    op.result = Some(result_data_clone);
+                                }
+                                
+                                op.timestamp = chrono::Utc::now().to_rfc3339();
+                            }
+                        },
+                        Err(e) => {
+                            // Update the operation state with error
+                            let mut ops = self_clone.operations.write().await;
+                            if let Some(op) = ops.get_mut(&op_id) {
+                                op.status = "failed".to_string();
+                                op.result = None;
+                                op.timestamp = chrono::Utc::now().to_rfc3339();
+                            }
+                            error!("Async execution failed: {:?}", e);
+                        }
+                    }
+                });
+                
+                // Return an ExecutionResult with the operation ID
+                Ok(ExecutionResult {
+                    result: op_id_for_return.as_bytes().to_vec(),
+                    state_hash: Vec::new(),
+                    stats: ExecutionStats {
+                        execution_time: 0,
+                        syscall_count: 0,
+                        memory_used: 0,
+                        network_latency: 0,
+                        custom_metrics: None,
+                    },
+                    attestations: Vec::new(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation_status: None,
+                    operation_id: None,
+                    pending_operations: None,
+                })
+            },
+            "check_operation" => {
+                // Check the status of an async operation
+                if let Ok(op_id) = String::from_utf8(input.clone()) {
+                    let ops = self.operations.read().await;
+                    if let Some(op) = ops.get(&op_id) {
+                        let status_json = serde_json::to_string(&op)
+                            .map_err(|e| TeeError::ExecutionError(e.to_string()))?;
+                        
+                        Ok(ExecutionResult {
+                            result: status_json.as_bytes().to_vec(),
+                            state_hash: Vec::new(),
+                            stats: ExecutionStats {
+                                execution_time: 0,
+                                syscall_count: 0,
+                                memory_used: 0,
+                                network_latency: 0,
+                                custom_metrics: None,
+                            },
+                            attestations: Vec::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            operation_status: None,
+                            operation_id: None,
+                            pending_operations: None,
+                        })
+                    } else {
+                        Err(TeeError::ExecutionError(format!("Operation not found: {}", op_id)))
+                    }
+                } else {
+                    Err(TeeError::ExecutionError("Invalid operation ID".to_string()))
+                }
+            },
+            _ => {
+                let result_data = self.execute_synchronously(payload, function_call, input).await?;
+                
+                // Create and return ExecutionResult
+                Ok(ExecutionResult {
+                    result: result_data,
+                    state_hash: Vec::new(),
+                    stats: ExecutionStats {
+                        execution_time: 0, // Filled in by metrics tracking
+                        syscall_count: 0,
+                        memory_used: 0,
+                        network_latency: 0,
+                        custom_metrics: None,
+                    },
+                    attestations: Vec::new(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation_status: None,
+                    operation_id: payload.operation_id.clone(),
+                    pending_operations: None,
+                })
+            }
+        }
+        
+        // Return the execution result
+
+    // Helper methods for mesh execution extension
+    
+    /// Check if mesh execution should be used for the given target TEE and region
+    async fn should_use_mesh_execution(&self, region_id: &str, target_tee: &str) -> bool {
+        // Default implementation - can be enhanced with more complex logic
+        self.mesh_enabled && self.mesh_coordinator.is_some()

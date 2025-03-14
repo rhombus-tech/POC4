@@ -163,6 +163,21 @@ pub struct MetricsStore {
     
     /// Worker latency tracking
     worker_latencies: Arc<RwLock<HashMap<String, Vec<f64>>>>,
+    
+    /// Counters for metrics
+    counters: Arc<RwLock<HashMap<String, u64>>>,
+    
+    /// Histograms for metrics
+    histograms: Arc<RwLock<HashMap<String, Histogram>>>,
+}
+
+#[derive(Debug, Clone)]
+struct Histogram {
+    sum: f64,
+    count: HashMap<u64, u64>,
+    min: f64,
+    max: f64,
+    total_count: u64,
 }
 
 impl MetricsStore {
@@ -175,6 +190,8 @@ impl MetricsStore {
             tee_type_metrics: Arc::new(RwLock::new(HashMap::new())),
             multi_metrics: Arc::new(RwLock::new(HashMap::new())),
             worker_latencies: Arc::new(RwLock::new(HashMap::new())),
+            counters: Arc::new(RwLock::new(HashMap::new())),
+            histograms: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
@@ -347,6 +364,101 @@ impl MetricsStore {
         Ok(())
     }
     
+    /// Record a successful mesh execution
+    pub async fn record_mesh_success(&self, region_id: &str, tee_id: &str) -> Result<(), String> {
+        let key = format!("mesh.success.{}.{}", region_id, tee_id);
+        self.increment_counter(&key, 1).await
+    }
+
+    /// Record a mesh execution latency threshold being exceeded
+    pub async fn record_mesh_latency_exceeded(&self, region_id: &str, tee_id: &str, latency_ms: u64) -> Result<(), String> {
+        let key = format!("mesh.latency_exceeded.{}.{}", region_id, tee_id);
+        let latency_key = format!("mesh.latency.{}.{}", region_id, tee_id);
+        
+        // Record the latency value
+        self.record_histogram_value(&latency_key, latency_ms as f64).await?;
+        
+        // Increment the latency exceeded counter
+        self.increment_counter(&key, 1).await
+    }
+
+    /// Record a mesh execution failure
+    pub async fn record_mesh_failure(&self, region_id: &str, tee_id: &str) -> Result<(), String> {
+        let key = format!("mesh.failure.{}.{}", region_id, tee_id);
+        self.increment_counter(&key, 1).await
+    }
+
+    /// Check if the circuit breaker is tripped for a region/TEE combination
+    pub async fn is_circuit_breaker_tripped(&self, region_id: &str, tee_id: &str) -> bool {
+        // Circuit breaker logic:
+        // 1. If too many failures in a short period
+        // 2. If latency consistently exceeds threshold
+        
+        let failure_key = format!("mesh.failure.{}.{}", region_id, tee_id);
+        let success_key = format!("mesh.success.{}.{}", region_id, tee_id);
+        let latency_exceeded_key = format!("mesh.latency_exceeded.{}.{}", region_id, tee_id);
+        
+        // Get metrics from the store
+        let failures = self.get_counter_value(&failure_key).await.unwrap_or(0);
+        let successes = self.get_counter_value(&success_key).await.unwrap_or(0);
+        let latency_exceeded = self.get_counter_value(&latency_exceeded_key).await.unwrap_or(0);
+        
+        // Calculate failure percentage (avoid division by zero)
+        let total_attempts = failures + successes;
+        let failure_rate = if total_attempts > 0 {
+            failures as f64 / total_attempts as f64
+        } else {
+            0.0
+        };
+        
+        // Calculate latency exceeded percentage
+        let latency_exceeded_rate = if total_attempts > 0 {
+            latency_exceeded as f64 / total_attempts as f64
+        } else {
+            0.0
+        };
+        
+        // Trip circuit breaker if:
+        // - More than 30% failures in last window (with minimum sample size), or
+        // - More than 50% of requests exceed latency threshold
+        let min_sample_size = 10; // Minimum requests to consider circuit breaker
+        
+        if total_attempts >= min_sample_size {
+            if failure_rate > 0.3 || latency_exceeded_rate > 0.5 {
+                return true;
+            }
+        }
+        
+        false
+    }
+
+    /// Get the success rate for mesh execution
+    pub async fn get_mesh_success_rate(&self, region_id: &str, tee_id: &str) -> f64 {
+        let failure_key = format!("mesh.failure.{}.{}", region_id, tee_id);
+        let success_key = format!("mesh.success.{}.{}", region_id, tee_id);
+        
+        // Get metrics from the store
+        let failures = self.get_counter_value(&failure_key).await.unwrap_or(0);
+        let successes = self.get_counter_value(&success_key).await.unwrap_or(0);
+        
+        // Calculate success percentage (avoid division by zero)
+        let total_attempts = failures + successes;
+        if total_attempts > 0 {
+            successes as f64 / total_attempts as f64
+        } else {
+            1.0 // Default to 100% success if no data (optimistic)
+        }
+    }
+
+    /// Get the average mesh execution latency
+    pub async fn get_average_mesh_latency(&self, region_id: &str, tee_id: &str) -> f64 {
+        let latency_key = format!("mesh.latency.{}.{}", region_id, tee_id);
+        
+        // Get average latency from the histogram
+        // In a real implementation, this would retrieve the actual average from a histogram
+        self.get_histogram_average(&latency_key).await.unwrap_or(0.0)
+    }
+    
     /// Get the average latency for a worker in a region
     pub async fn get_average_latency(&self, region_id: &str, worker_id: &str) -> Option<f64> {
         let worker_latencies = self.worker_latencies.read().await;
@@ -440,6 +552,82 @@ impl MetricsStore {
     /// Get all region metrics
     pub async fn get_all_region_metrics(&self) -> HashMap<String, TeePerformanceMetrics> {
         self.region_metrics.read().await.clone()
+    }
+
+    /// Record a successful mesh state retrieval operation
+    pub async fn record_mesh_state_retrieval_success(&self, region_id: &str, tee_id: &str, duration_ms: f64) -> Result<(), String> {
+        // Record as a success in mesh operations
+        self.record_mesh_success(region_id, tee_id).await?;
+        
+        // Record the latency specifically for state retrieval operations
+        let key = format!("mesh:state_retrieval:{}:{}", region_id, tee_id);
+        self.record_histogram_value(&key, duration_ms).await?;
+        
+        // Update overall state retrieval metrics
+        self.record_histogram_value("mesh:state_retrieval:all", duration_ms).await?;
+        self.increment_counter("mesh:state_retrieval:count", 1).await?;
+        
+        Ok(())
+    }
+    
+    /// Increment circuit breaker failures counter for a specific region/TEE
+    pub async fn increment_circuit_breaker_failures(&self, region_id: &str, tee_id: &str) -> Result<(), String> {
+        let key = format!("circuit_breaker:failures:{}:{}", region_id, tee_id);
+        self.increment_counter(&key, 1).await?;
+        
+        // Also increment the global failure counter
+        self.increment_counter("circuit_breaker:failures:total", 1).await?;
+        
+        Ok(())
+    }
+
+    /// Get the value of a counter from the metrics store
+    async fn get_counter_value(&self, key: &str) -> Option<u64> {
+        let counters = self.counters.read().await;
+        counters.get(key).cloned()
+    }
+
+    /// Get the average value from a histogram
+    async fn get_histogram_average(&self, key: &str) -> Option<f64> {
+        let histograms = self.histograms.read().await;
+        
+        let histogram = histograms.get(key)?;
+        if histogram.total_count == 0 {
+            return None;
+        }
+        
+        Some(histogram.sum / histogram.total_count as f64)
+    }
+
+    /// Record a value in a histogram
+    async fn record_histogram_value(&self, key: &str, value: f64) -> Result<(), String> {
+        let mut histograms = self.histograms.write().await;
+        let histogram = histograms.entry(key.to_string()).or_insert_with(|| Histogram {
+            sum: 0.0,
+            count: HashMap::new(),
+            min: f64::MAX,
+            max: f64::MIN,
+            total_count: 0,
+        });
+        
+        // Update histogram statistics
+        histogram.sum += value;
+        histogram.total_count += 1;
+        histogram.min = histogram.min.min(value);
+        histogram.max = histogram.max.max(value);
+        
+        // Update bucket counts (simplified impl)
+        let bucket = (value / 10.0).floor() as u64 * 10; // Group in 10ms buckets
+        *histogram.count.entry(bucket).or_insert(0) += 1;
+        
+        Ok(())
+    }
+
+    /// Increment a counter in the metrics store
+    async fn increment_counter(&self, key: &str, value: u64) -> Result<(), String> {
+        let mut counters = self.counters.write().await;
+        *counters.entry(key.to_string()).or_insert(0) += value;
+        Ok(())
     }
 }
 

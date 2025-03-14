@@ -1,10 +1,17 @@
 use reqwest;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use uuid::Uuid;
+use tee_interface::{TeeError, ExecutionResult, ExecutionParams};
+use reqwest::Client;
+use tokio::time::timeout;
 use tokio::sync::RwLock;
 use std::sync::Arc;
 use std::collections::HashMap;
+use base64;
+use uuid::Uuid;
+
+// Import the ExecutionRequest from proto
+use crate::proto::teeservice::ExecutionRequest;
 
 // Define the types we need to interact with the coordinator
 // These match the Go types in the coordinator
@@ -48,6 +55,13 @@ pub struct CoordinatorResponse {
     pub success: bool,
     pub error: Option<String>,
     pub data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorExecutionResult {
+    pub success: bool,
+    pub error: Option<String>,
+    pub result: Option<ExecutionResult>, 
 }
 
 // Client to communicate with the coordinator
@@ -377,5 +391,90 @@ impl CoordinatorClient {
             })?;
             
         Ok(workers)
+    }
+
+    // Submit execution request to the coordinator 
+    pub async fn submit_execution(
+        &self,
+        request: ExecutionRequest,
+    ) -> Result<CoordinatorExecutionResult, String> {
+        let json = serde_json::to_string(&request).map_err(|e| format!("Error serializing request: {}", e))?;
+        let url = format!("{}/execution", self.base_url);
+        let resp = self.client.post(&url)
+            .header("Content-Type", "application/json")
+            .body(json)
+            .send()
+            .await
+            .map_err(|e| format!("Error submitting execution: {}", e))?;
+
+        if resp.status().is_success() {
+            let result = resp.json::<CoordinatorExecutionResult>().await
+                .map_err(|e| format!("Error parsing execution result: {}", e))?;
+            Ok(result)
+        } else {
+            Err(format!("Error submitting execution: {}", resp.status()))
+        }
+    }
+
+    // Update state via coordinator
+    pub async fn update_state(&self, contract_id: &str, key: &[u8], value: &[u8]) -> Result<(), String> {
+        let url = format!("{}/contracts/{}/state", self.base_url, contract_id);
+        
+        // Convert the key to base64 for the URL
+        let key_base64 = base64::encode(key);
+        
+        let response = self.client
+            .post(&url)
+            .json(&serde_json::json!({
+                "key": key_base64,
+                "value": base64::encode(value),
+                "worker_id": self.worker_id,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to update state: {}", e))?;
+
+        let response_body: CoordinatorResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        if response_body.success {
+            Ok(())
+        } else {
+            Err(response_body.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+    
+    // Get state via coordinator
+    pub async fn get_state(&self, contract_id: &str, key: &[u8]) -> Result<Vec<u8>, String> {
+        // Convert the key to base64 for the URL
+        let key_base64 = base64::encode(key);
+        let url = format!("{}/contracts/{}/state?key={}", self.base_url, contract_id, key_base64);
+        
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to get state: {}", e))?;
+
+        let response_body: CoordinatorResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        if response_body.success {
+            // Parse the value from the response
+            let data = response_body.data
+                .ok_or_else(|| "Missing data in response".to_string())?;
+            let data_str = data.as_str()
+                .ok_or_else(|| "Data is not a string".to_string())?;
+                
+            // Decode the base64 value
+            base64::decode(data_str)
+                .map_err(|e| format!("Failed to decode value: {}", e))
+        } else {
+            Err(response_body.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
     }
 }

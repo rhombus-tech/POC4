@@ -142,6 +142,10 @@ impl TeeExecution for TeeServer {
             operation_id: None,
             previous_operation_id: None,
             operation_context: None,
+            region_id: None,
+            target_tee: None,
+            tee_type: None,
+            allow_fallback: Some(true),
         };
 
         let result = self.executor

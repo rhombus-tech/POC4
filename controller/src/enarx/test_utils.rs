@@ -169,6 +169,10 @@ impl EnarxTester {
             operation_id: Some("test_operation".to_string()),
             previous_operation_id: None,
             operation_context: None,
+            allow_fallback: Some(true),  
+            region_id: Some("default".to_string()),
+            target_tee: None,
+            tee_type: None,  
         };
         
         // Execute the contract

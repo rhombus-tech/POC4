@@ -14,6 +14,7 @@ pub mod integration_tests;
 pub mod discovery_service;
 pub mod discovery_integration;
 pub mod accumulator_client;
+pub mod hyper_mesh_extension;
 
 pub use simulator::SimulatorController;
 pub use enarx::EnarxController;
@@ -30,6 +31,7 @@ pub use policy::{Policy, PolicyManager, SharedPolicyManager, PolicyRule, Circuit
 pub use discovery_service::{DiscoveryService, DiscoveryServiceConfig};
 pub use discovery_integration::EnhancedDiscoveryIntegration;
 pub use accumulator_client::{AccumulatorClientTrait, MockAccumulatorClient, RealAccumulatorClient, create_accumulator_client};
+pub use hyper_mesh_extension::MeshExecutionExtension;
 
 #[cfg(test)]
 mod policy_test;

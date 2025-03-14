@@ -211,6 +211,8 @@ impl TeeExecutor for EnarxController {
             execution_time,
             memory_used: 0, // Not tracked in our current implementation
             syscall_count: 0, // Not tracked in our current implementation
+            network_latency: 0, // Not applicable for Enarx execution
+            custom_metrics: None, // No custom metrics yet
         };
         
         // Get attestation
