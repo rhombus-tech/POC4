@@ -154,6 +154,8 @@ impl TeeExecutor for ParallelMockTeeExecutor {
                             execution_time: 5,
                             memory_used: 1024,
                             syscall_count: 1,
+                            network_latency: 0,
+                            custom_metrics: None,
                         },
                         operation_status: Some("completed".to_string()),
                         operation_id: payload.operation_id.as_ref().cloned().or_else(|| Some(format!("op-{}", op_count))),
@@ -183,6 +185,8 @@ impl TeeExecutor for ParallelMockTeeExecutor {
                 execution_time: random_delay as u64,
                 memory_used: 1024,
                 syscall_count: 1,
+                network_latency: 0,
+                custom_metrics: None,
             },
             operation_status: Some("completed".to_string()),
             operation_id: payload.operation_id.as_ref().cloned().or_else(|| Some(format!("op-{}", op_count))),
@@ -289,6 +293,10 @@ async fn test_parallel_operations() -> Result<(), Box<dyn Error>> {
                 operation_id: Some(op_id.clone()),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Execute the operation and capture metrics
@@ -391,6 +399,10 @@ async fn test_single_tee_state_conflicts() -> Result<(), Box<dyn Error>> {
         operation_id: Some("init-operation".to_string()),
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("test-region".to_string()),
+        target_tee: None, 
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     let _ = tee.execute(&init_payload).await?;
     
@@ -421,6 +433,10 @@ async fn test_single_tee_state_conflicts() -> Result<(), Box<dyn Error>> {
                 operation_id: Some(operation_id),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Small delay to ensure operations are properly registered
@@ -448,6 +464,10 @@ async fn test_single_tee_state_conflicts() -> Result<(), Box<dyn Error>> {
                 operation_id: Some(format!("check-{}", i)), // Just use a generated ID
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             return tee_clone2.execute(&final_check).await;
@@ -475,6 +495,10 @@ async fn test_single_tee_state_conflicts() -> Result<(), Box<dyn Error>> {
         operation_id: Some(Uuid::new_v4().to_string()),
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("test-region".to_string()),
+        target_tee: None, 
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     let get_result = tee.execute(&read_payload).await?;
@@ -524,6 +548,10 @@ async fn test_tee_pair_execution() -> Result<(), Box<dyn Error>> {
                 operation_id: Some(Uuid::new_v4().to_string()),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let (duration, _result) = measure_execution_time(|| async {
@@ -618,6 +646,10 @@ async fn test_high_concurrency_mixed_operations() -> Result<(), Box<dyn std::err
                 operation_id: Some(Uuid::new_v4().to_string()),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Small randomized delay to simulate real-world concurrent requests
@@ -759,6 +791,10 @@ async fn test_multiple_contracts_parallel_execution() -> Result<(), Box<dyn std:
                     operation_id: Some(operation_id),
                     previous_operation_id: None,
                     operation_context: None,
+                    region_id: Some("test-region".to_string()),
+                    target_tee: None, 
+                    tee_type: Some("SGX".to_string()),
+                    allow_fallback: Some(true),
                 };
                 
                 // Small randomized delay to simulate real-world concurrent requests
@@ -929,6 +965,10 @@ async fn run_batch_test(
             operation_id: Some(operation_id),
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some("test-region".to_string()),
+            target_tee: None, 
+            tee_type: Some("SGX".to_string()),
+            allow_fallback: Some(true),
         };
         
         current_batch.push(payload);
@@ -1025,6 +1065,10 @@ async fn test_standard_interface_parallel_execution() -> Result<(), Box<dyn Erro
                 operation_id: Some(Uuid::new_v4().to_string()),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let result = tee_clone2.execute(&payload).await;
@@ -1070,6 +1114,10 @@ async fn test_standard_interface_parallel_execution() -> Result<(), Box<dyn Erro
                 operation_id: Some(format!("op-set-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             println!("DEBUG: Storing value: {} for key: {} in contract: {}", value, key, set_payload.params.id_to);
@@ -1089,6 +1137,10 @@ async fn test_standard_interface_parallel_execution() -> Result<(), Box<dyn Erro
                 operation_id: Some(format!("op-get-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             println!("DEBUG: Retrieving value for key: {} from contract: {}", key, get_payload.params.id_to);
@@ -1157,6 +1209,10 @@ async fn test_standard_interface_parallel_execution_with_tee_pair() -> Result<()
                 operation_id: Some(format!("op-{}", i)),  // Use i to create unique operation IDs
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let (duration, result) = measure_execution_time(|| async {
@@ -1235,6 +1291,10 @@ async fn deploy_contract_test() -> Result<(), Box<dyn Error>> {
                 operation_id: Some(format!("op-set-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Execute the 'set' operation
@@ -1254,6 +1314,10 @@ async fn deploy_contract_test() -> Result<(), Box<dyn Error>> {
                 operation_id: Some(format!("op-get-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Execute the 'get' operation
@@ -1320,6 +1384,10 @@ async fn test_token_transfer() -> Result<(), Box<dyn Error + Send + Sync>> {
                 operation_id: Some(format!("balance-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Execute balance check
@@ -1339,6 +1407,10 @@ async fn test_token_transfer() -> Result<(), Box<dyn Error + Send + Sync>> {
                 operation_id: Some(format!("transfer-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let transfer_result = tee_clone.execute(&transfer_payload).await?;
@@ -1391,6 +1463,10 @@ async fn test_parallel_submission() -> Result<(), Box<dyn Error + Send + Sync>> 
                 operation_id: Some(format!("parallel-{}", i)),
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("test-region".to_string()),
+                target_tee: None, 
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             // Execute the operation
@@ -1492,6 +1568,10 @@ async fn test_basic_operations() -> Result<(), Box<dyn Error + Send + Sync>> {
         operation_id: Some("test-operation-1".to_string()),
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("test-region".to_string()),
+        target_tee: None, 
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     // Execute the operation
@@ -1503,7 +1583,7 @@ async fn test_basic_operations() -> Result<(), Box<dyn Error + Send + Sync>> {
     
     // Check operation status by querying
     let status_payload = ExecutionPayload {
-        input: Vec::new(),
+        input: "status".as_bytes().to_vec(),
         params: ExecutionParams {
             id_to: contract_id,
             function_call: "status".to_string(),
@@ -1513,6 +1593,10 @@ async fn test_basic_operations() -> Result<(), Box<dyn Error + Send + Sync>> {
         operation_id: Some("status-check".to_string()),
         previous_operation_id: Some("test-operation-1".to_string()),
         operation_context: None,
+        region_id: Some("test-region".to_string()),
+        target_tee: None, 
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     let check_exec_result = tee_executor.execute(&status_payload).await?;
@@ -1670,6 +1754,10 @@ async fn test_multi_contract_parallel_execution() -> Result<(), Box<dyn Error>> 
                     operation_id: Some(operation_id),
                     previous_operation_id: None,
                     operation_context: None,
+                    region_id: Some("test-region".to_string()),
+                    target_tee: None, 
+                    tee_type: Some("SGX".to_string()),
+                    allow_fallback: Some(true),
                 };
                 
                 // Small randomized delay to simulate real-world concurrent requests

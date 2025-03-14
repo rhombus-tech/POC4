@@ -64,6 +64,10 @@ async fn test_controller_metrics_integration() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("us-west".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     // Execute the payload a few times

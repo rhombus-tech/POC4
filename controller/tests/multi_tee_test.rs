@@ -93,6 +93,10 @@ async fn test_multi_tee_execution() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("default-region".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     // Execute the store command
@@ -111,6 +115,10 @@ async fn test_multi_tee_execution() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("default-region".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     // Execute the get command
@@ -158,6 +166,10 @@ async fn test_parallel_execution() {
                 operation_id: None,
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("default-region".to_string()),
+                target_tee: None,
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let result = coordinator_clone.execute_task(&store_payload).await.unwrap();
@@ -189,6 +201,10 @@ async fn test_parallel_execution() {
             operation_id: None,
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some("default-region".to_string()),
+            target_tee: None,
+            tee_type: Some("SGX".to_string()),
+            allow_fallback: Some(true),
         };
         
         let get_result = coordinator.execute_task(&get_payload).await.unwrap();
@@ -220,6 +236,10 @@ async fn test_parallel_execution() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("default-region".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     let init_result = coordinator.execute_task(&init_payload).await.unwrap();
@@ -247,6 +267,10 @@ async fn test_parallel_execution() {
                 operation_id: None,
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("default-region".to_string()),
+                target_tee: None,
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let result = coordinator_clone.execute_task(&conflict_payload).await;
@@ -283,6 +307,10 @@ async fn test_parallel_execution() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("default-region".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     let final_value = coordinator.execute_task(&check_payload).await.unwrap();
@@ -322,6 +350,10 @@ async fn test_parallel_execution() {
                 operation_id: None,
                 previous_operation_id: None,
                 operation_context: None,
+                region_id: Some("default-region".to_string()),
+                target_tee: None,
+                tee_type: Some("SGX".to_string()),
+                allow_fallback: Some(true),
             };
             
             let result = coordinator_clone.execute_task(&store_payload).await.unwrap();
@@ -352,6 +384,10 @@ async fn test_parallel_execution() {
             operation_id: None,
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some("default-region".to_string()),
+            target_tee: None,
+            tee_type: Some("SGX".to_string()),
+            allow_fallback: Some(true),
         };
         
         let get_result = coordinator.execute_task(&get_payload).await.unwrap();
@@ -408,6 +444,10 @@ async fn test_state_conflict_handling() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("default-region".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     let init_result = coordinator.execute_task(&init_payload).await.unwrap();
@@ -433,6 +473,10 @@ async fn test_state_conflict_handling() {
                     operation_id: None,
                     previous_operation_id: None,
                     operation_context: None,
+                    region_id: Some("default-region".to_string()),
+                    target_tee: None,
+                    tee_type: Some("SGX".to_string()),
+                    allow_fallback: Some(true),
                 };
                 
                 coordinator.execute_task(&get_payload).await
@@ -452,6 +496,10 @@ async fn test_state_conflict_handling() {
                     operation_id: None,
                     previous_operation_id: None,
                     operation_context: None,
+                    region_id: Some("default-region".to_string()),
+                    target_tee: None,
+                    tee_type: Some("SGX".to_string()),
+                    allow_fallback: Some(true),
                 };
                 
                 coordinator.execute_task(&update_payload).await
@@ -471,6 +519,10 @@ async fn test_state_conflict_handling() {
                     operation_id: None,
                     previous_operation_id: None,
                     operation_context: None,
+                    region_id: Some("default-region".to_string()),
+                    target_tee: None,
+                    tee_type: Some("SGX".to_string()),
+                    allow_fallback: Some(true),
                 };
                 
                 coordinator.execute_task(&update_payload).await
@@ -501,6 +553,10 @@ async fn test_state_conflict_handling() {
         operation_id: None,
         previous_operation_id: None,
         operation_context: None,
+        region_id: Some("default-region".to_string()),
+        target_tee: None,
+        tee_type: Some("SGX".to_string()),
+        allow_fallback: Some(true),
     };
     
     let final_value = coordinator.execute_task(&final_get_payload).await.unwrap();

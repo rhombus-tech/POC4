@@ -903,6 +903,11 @@ impl EnhancedMeshTestHarness {
                 operation_id: Some(Uuid::new_v4().to_string()),
                 previous_operation_id: None,
                 operation_context: None,
+                // Add missing required fields
+                region_id: Some("test-region".to_string()),
+                target_tee: Some("test-tee".to_string()),
+                tee_type: Some("IntelSGX".to_string()),
+                allow_fallback: Some(true),
             }).await;
 
             // Process results and update metrics
@@ -1205,7 +1210,7 @@ impl EnhancedTestTeeNode {
     }
 
     fn process_contract_input(&self, input: &[u8]) -> Vec<u8> {
-        // Parse the JSON input
+        // Try to parse the input as JSON
         if let Ok(json_str) = std::str::from_utf8(input) {
             if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(json_str) {
                 // Extract the function name and arguments
@@ -1214,13 +1219,12 @@ impl EnhancedTestTeeNode {
                         "add" => {
                             // Get the arguments array
                             if let Some(args) = json_value.get("args").and_then(|a| a.as_array()) {
-                                if args.len() >= 2 {
+                                if args.len() == 2 {
                                     // Extract the two numbers
-                                    if let (Some(num1), Some(num2)) = (args[0].as_i64(), args[1].as_i64()) {
-                                        // Perform the addition
-                                        let result = (num1 as i32).wrapping_add(num2 as i32);
+                                    if let (Some(a), Some(b)) = (args[0].as_i64(), args[1].as_i64()) {
+                                        let result = a + b;
                                         
-                                        // Return the result as a string in bytes
+                                        // Return the result as bytes
                                         return result.to_string().into_bytes();
                                     }
                                 }
@@ -1381,6 +1385,11 @@ impl EnhancedNetworkHarness {
             operation_id: Some("op1".to_string()),
             previous_operation_id: None,
             operation_context: None,
+            // Add missing required fields
+            region_id: Some("test-region".to_string()),
+            target_tee: Some("test-tee".to_string()),
+            tee_type: Some("IntelSGX".to_string()),
+            allow_fallback: Some(true),
         };
         
         // Get the node IDs
@@ -1484,6 +1493,8 @@ impl HyperTeeController {
                 execution_time: 0,
                 memory_used: 0,
                 syscall_count: 0,
+                custom_metrics: None,
+                network_latency: 0,
             },
             timestamp: "0".to_string(),  // Should be a String
             operation_status: Some("success".to_string()),  // Should be Option<String>

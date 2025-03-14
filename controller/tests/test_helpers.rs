@@ -51,9 +51,11 @@ impl TeeExecutor for MockTeeExecutor {
                 enclave_type: TeeType::SGX,
             }],
             stats: ExecutionStats {
-                execution_time: 1000,
+                execution_time: 1,
                 memory_used: 1024 * 1024,
                 syscall_count: 10,
+                network_latency: 0,
+                custom_metrics: None,
             },
             operation_status: Some("completed".to_string()),
             operation_id: Some(format!("op-{}", op_count)),

@@ -102,6 +102,10 @@ impl TestTeeNode {
             operation_id: Some(Uuid::new_v4().to_string()),
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some(self.region_id.clone()),
+            target_tee: Some(self.id.clone()),
+            tee_type: Some(self.get_compatible_tee_type_string()),
+            allow_fallback: Some(true),
         };
         
         let result = self.controller.execute(&payload).await
@@ -123,6 +127,10 @@ impl TestTeeNode {
             operation_id: Some(Uuid::new_v4().to_string()),
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some(self.region_id.clone()),
+            target_tee: Some(self.id.clone()),
+            tee_type: Some(self.get_compatible_tee_type_string()),
+            allow_fallback: Some(true),
         };
         
         let result = self.controller.execute(&payload).await
