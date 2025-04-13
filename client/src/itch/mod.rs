@@ -14,7 +14,9 @@
  */
 
 pub mod client;
+pub mod multicast;
 pub mod parser;
+pub mod realtime;
 pub mod types;
 pub mod book;
 #[cfg(test)]

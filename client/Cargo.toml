@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["full", "net"] }
 
 # Error handling
 thiserror = "1.0"
+libc = "0.2"
 anyhow = "1.0"
 
 # Cryptography for attestation
@@ -64,3 +65,15 @@ test-itch = ["market-data"]
 tokio-test = "0.4"
 mockall = "0.11"
 criterion = "0.4"  # For benchmarking
+
+[[example]]
+name = "realtime_itch_demo"
+required-features = ["market-data"]
+
+[[example]]
+name = "itch_multicast_demo"
+required-features = ["market-data"]
+
+[[example]]
+name = "order_book_test"
+required-features = ["market-data"]

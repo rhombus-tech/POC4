@@ -8,6 +8,7 @@
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::default::Default;
 
 /// Message types defined in NASDAQ ITCH 5.0 protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -78,8 +79,9 @@ impl From<u8> for MessageType {
 }
 
 /// Buy/Sell indicator for orders
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BuySellIndicator {
+    #[default]
     Buy,
     Sell,
     Unknown,
@@ -96,8 +98,9 @@ impl From<u8> for BuySellIndicator {
 }
 
 /// System event codes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SystemEventCode {
+    #[default]
     StartOfMessages,
     StartOfSystemHours,
     StartOfMarketHours,
@@ -173,13 +176,13 @@ pub enum MessagePayload {
 }
 
 /// System event message
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemEventMessage {
     /// Event code indicating the type of system event
     pub event_code: SystemEventCode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StockDirectoryMessage {
     pub stock: String,
     pub market_category: u8,
@@ -204,7 +207,7 @@ pub struct TradingActionMessage {
     pub reason: [u8; 4],
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AddOrderMessage {
     pub order_reference_number: u64,
     pub buy_sell_indicator: BuySellIndicator,
@@ -223,7 +226,7 @@ pub struct AddOrderWithMPIDMessage {
     pub attribution: [u8; 4],
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrderExecutedMessage {
     pub order_reference_number: u64,
     pub executed_shares: u32,

@@ -155,6 +155,7 @@ dependencies = [
  "bytes",
  "criterion",
  "ed25519-dalek",
+ "libc",
  "mockall",
  "prost 0.11.9",
  "rand",

@@ -10,7 +10,7 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
 /// Supported parameter formats for WebAssembly contracts
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ParameterFormat {
     /// Length-prefixed format (4-byte length + data)
     LengthPrefixed,

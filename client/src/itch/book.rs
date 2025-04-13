@@ -459,6 +459,11 @@ impl OrderBookReconstructor {
         self.books.keys().cloned().collect()
     }
     
+    /// Get all order books
+    pub fn get_all_books(&self) -> &HashMap<String, StockOrderBook> {
+        &self.books
+    }
+    
     /// Reset statistics
     pub fn reset_statistics(&mut self) {
         self.messages_processed = 0;

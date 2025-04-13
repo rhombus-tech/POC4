@@ -13,8 +13,9 @@ use thiserror::Error;
 use std::sync::Arc;
 
 pub mod adapters;
-pub mod protocol;
+pub mod aot;
 pub mod error;
+pub mod protocol;
 pub mod nasdaq;
 
 // Feature-gated modules
