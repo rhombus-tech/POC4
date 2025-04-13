@@ -92,6 +92,12 @@ pub enum ExecutionResult {
     
     /// Execution is pending
     Pending,
+    
+    /// Execution was rejected
+    Rejected,
+    
+    /// Unknown execution result
+    Unknown,
 }
 
 /// Attestation data for verification

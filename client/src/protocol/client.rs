@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{ClientConfig, error::{Result, Error, ProtocolError}};
+use crate::{ClientConfig, error::{Result, ProtocolError}};
+use thiserror::Error;
 use super::binary_protocol::{Message, MessageType, ParameterData, ParameterFormatType};
 use super::tee_transport::{TeeTransport, TeeType, VerificationAccumulator};
 use super::types::*;
@@ -120,6 +121,10 @@ impl ProtocolClient {
             },
             ParameterFormat::Direct => {
                 ParameterData::to_direct(&request.parameters)
+            },
+            ParameterFormat::Empty => {
+                // Handle empty parameters case - no data
+                ParameterData::to_direct(&[])
             }
         };
         

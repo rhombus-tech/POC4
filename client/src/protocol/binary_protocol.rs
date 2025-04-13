@@ -1,4 +1,6 @@
-use crate::error::Error;
+use thiserror::Error;
+use std::error::Error as StdError;
+use crate::error::ProtocolError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
@@ -18,7 +20,7 @@ pub enum MessageType {
 }
 
 impl TryFrom<u8> for MessageType {
-    type Error = Error;
+    type Error = ProtocolError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -26,7 +28,7 @@ impl TryFrom<u8> for MessageType {
             1 => Ok(MessageType::Response),
             2 => Ok(MessageType::Attestation),
             3 => Ok(MessageType::KeepAlive),
-            _ => Err(Error::Protocol(format!("Invalid message type: {}", value))),
+            _ => Err(ProtocolError::RegionCommunication(format!("Invalid message type: {}", value))),
         }
     }
 }
@@ -78,21 +80,21 @@ impl MessageHeader {
         buf.put_u64(self.request_id);
     }
     
-    pub fn decode(buf: &mut BytesMut) -> Result<Self, Error> {
+    pub fn decode(buf: &mut BytesMut) -> Result<Self, ProtocolError> {
         if buf.remaining() < Self::SIZE {
-            return Err(Error::Protocol("Incomplete message header".to_string()));
+            return Err(ProtocolError::RegionCommunication("Incomplete message header".to_string()));
         }
         
         let magic = [buf[0], buf[1], buf[2], buf[3]];
         if magic != Self::MAGIC {
-            return Err(Error::Protocol(format!("Invalid magic bytes: {:?}", magic)));
+            return Err(ProtocolError::RegionCommunication(format!("Invalid magic bytes: {:?}", magic)));
         }
         
         buf.advance(4); // Skip magic
         
         let version = buf.get_u8();
         if version != Self::CURRENT_VERSION {
-            return Err(Error::Protocol(format!("Unsupported protocol version: {}", version)));
+            return Err(ProtocolError::RegionCommunication(format!("Unsupported protocol version: {}", version)));
         }
         
         let msg_type = MessageType::try_from(buf.get_u8())?;
@@ -100,7 +102,7 @@ impl MessageHeader {
         let length = buf.get_u32();
         
         if length as usize > MAX_MESSAGE_SIZE {
-            return Err(Error::Protocol(format!("Message too large: {} bytes", length)));
+            return Err(ProtocolError::RegionCommunication(format!("Message too large: {} bytes", length)));
         }
         
         let request_id = buf.get_u64();
@@ -123,10 +125,10 @@ pub struct Message<T> {
 }
 
 impl<T: Serialize> Message<T> {
-    pub fn new(msg_type: MessageType, payload: T, request_id: u64) -> Result<Self, Error> {
+    pub fn new(msg_type: MessageType, payload: T, request_id: u64) -> Result<Self, ProtocolError> {
         // Serialize payload to determine length
         let payload_bytes = bincode::serialize(&payload)
-            .map_err(|e| Error::Protocol(format!("Failed to serialize payload: {}", e)))?;
+            .map_err(|e| ProtocolError::RegionCommunication(format!("Failed to serialize payload: {}", e)))?;
             
         let length = payload_bytes.len() as u32;
         
@@ -136,9 +138,9 @@ impl<T: Serialize> Message<T> {
         })
     }
     
-    pub fn encode(&self) -> Result<BytesMut, Error> {
+    pub fn encode(&self) -> Result<BytesMut, ProtocolError> {
         let payload_bytes = bincode::serialize(&self.payload)
-            .map_err(|e| Error::Protocol(format!("Failed to serialize payload: {}", e)))?;
+            .map_err(|e| ProtocolError::RegionCommunication(format!("Failed to serialize payload: {}", e)))?;
             
         let total_len = MessageHeader::SIZE + payload_bytes.len();
         let mut buf = BytesMut::with_capacity(total_len);
@@ -151,9 +153,9 @@ impl<T: Serialize> Message<T> {
 }
 
 impl<T: for<'de> Deserialize<'de>> Message<T> {
-    pub fn decode(header: MessageHeader, payload_bytes: &[u8]) -> Result<Self, Error> {
+    pub fn decode(header: MessageHeader, payload_bytes: &[u8]) -> Result<Self, ProtocolError> {
         let payload = bincode::deserialize(payload_bytes)
-            .map_err(|e| Error::Protocol(format!("Failed to deserialize payload: {}", e)))?;
+            .map_err(|e| ProtocolError::RegionCommunication(format!("Failed to deserialize payload: {}", e)))?;
             
         Ok(Self {
             header,

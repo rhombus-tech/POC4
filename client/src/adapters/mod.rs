@@ -6,7 +6,7 @@
  * implementations for APIs like NASDAQ's Capital Access Platform.
  */
 
-mod types;
+pub mod types;
 mod api_adapter;
 
 pub use types::*;

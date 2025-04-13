@@ -5,12 +5,15 @@ members = [
     "wasm-module",
     "controller",
     "contract",
+    "client",
     "controller/src/bin/wasm_module",
     "controller/tests/contracts/simple_add",
     "controller/tests/contracts/simple_multiply",
     "controller/tests/contracts/token_transfer",
     "controller/tests/contracts/key_value_store", 
     "controller/tests/contracts/data_oracle",
+    "controller/tests/contracts/market_data_consumer",
+    "mock-sev-snp-types",
     "wasmlanche"
 ]
 exclude = []

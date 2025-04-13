@@ -5,22 +5,37 @@
  * - Cross-regional communication between TEE pairs
  * - WebAssembly contract parameter handling
  * - External API integration (including NASDAQ Capital Access Platform)
+ * - High-performance ITCH market data integration 
  * - Attestation verification for secure communication
  */
 
-pub mod error;
-pub mod protocol;
-pub mod adapters;
-pub mod nasdaq;
-pub mod attestation;
-
+use thiserror::Error;
 use std::sync::Arc;
 
-/// Core client for interacting with the Aristo TEE mesh network
-#[derive(Clone)]
-pub struct AristoClient {
-    config: Arc<ClientConfig>,
-}
+pub mod adapters;
+pub mod protocol;
+pub mod error;
+pub mod nasdaq;
+
+// Feature-gated modules
+#[cfg(feature = "market-data")]
+pub mod itch;
+
+#[cfg(any(feature = "sgx", feature = "sev"))]
+pub mod attestation;
+
+pub mod client;
+pub mod tee;
+
+pub use client::AristoClient;
+pub use protocol::ParameterFormat;
+
+/// Re-export TEE-specific types as needed
+#[cfg(feature = "sev")]
+pub use sev_snp_types;
+
+#[cfg(feature = "sgx")]
+pub use sgx_types;
 
 /// Configuration for the AristoClient
 #[derive(Debug, Clone)]
@@ -28,38 +43,15 @@ pub struct ClientConfig {
     /// Endpoints for regional TEE coordinators
     pub regions: std::collections::HashMap<String, String>,
     /// Attestation verification configuration
+    #[cfg(any(feature = "sgx", feature = "sev"))]
     pub attestation: Option<attestation::AttestationConfig>,
+    #[cfg(not(any(feature = "sgx", feature = "sev")))]
+    pub attestation: Option<()>, // Placeholder when attestation is not enabled
     /// Optional external API configurations
     pub external_apis: std::collections::HashMap<String, adapters::ApiConfig>,
 }
 
-impl AristoClient {
-    /// Create a new client with the provided configuration
-    pub fn new(config: ClientConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-        }
-    }
-    
-    /// Get a protocol client for cross-regional communication
-    pub fn protocol(&self) -> protocol::ProtocolClient {
-        protocol::ProtocolClient::new(self.config.clone())
-    }
-    
-    /// Get an adapter for external API integration
-    pub fn adapter(&self, name: &str) -> Option<adapters::ApiAdapter> {
-        self.config.external_apis.get(name).map(|config| {
-            adapters::ApiAdapter::new(name.to_string(), config.clone())
-        })
-    }
-    
-    /// Get the NASDAQ API client if configured
-    pub fn nasdaq(&self) -> Option<nasdaq::NasdaqClient> {
-        self.adapter("nasdaq").map(|adapter| {
-            nasdaq::NasdaqClient::new(adapter)
-        })
-    }
-}
+// AristoClient implementation is now in client.rs
 
 #[cfg(test)]
 mod tests {

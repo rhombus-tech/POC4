@@ -1,0 +1,1 @@
+/Users/talzisckind/Downloads/aristo-fresh\ 2/execution/client/examples/wasm_contracts/orderbook_analyzer/target/wasm32-unknown-unknown/release/orderbook_analyzer.wasm: /Users/talzisckind/Downloads/aristo-fresh\ 2/execution/client/examples/wasm_contracts/orderbook_analyzer/src/lib.rs

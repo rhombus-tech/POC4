@@ -9,6 +9,7 @@ tokio = { version = "1.0", features = ["full", "macros", "rt-multi-thread"] }
 tonic = { version = "0.11", features = ["transport"] }
 prost = { workspace = true }
 tee-interface = { path = "../interface", features = ["async"] }
+aristo-client = { path = "../client", features = ["market-data"] }
 wasmlanche = { path = "../../hyper/x/contracts/wasmlanche" }
 async-trait = "0.1"
 futures = { version = "0.3", features = ["std", "async-await"] }

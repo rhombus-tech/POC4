@@ -1,11 +1,13 @@
-use crate::error::Error;
-use crate::protocol::binary_protocol::{Message, MessageHeader, MessageType, ParameterData};
+// use thiserror::Error;
+use crate::error::{Result, ProtocolError};
+use crate::protocol::binary_protocol::{Message, MessageHeader, MessageType};
 use bytes::{BytesMut, Bytes};
-use serde::{Deserialize, Serialize};
+use serde::{Serialize};
+use serde::de::DeserializeOwned;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, ToSocketAddrs};
-use tracing::{debug, error, info, trace, warn};
+use tokio::net::TcpStream;
+use tracing::{debug, info, trace, warn};
 
 /// TEE-agnostic transport for secure communication with remote regions
 ///
@@ -25,6 +27,19 @@ pub struct TeeTransport {
     
     /// Has attestation verification been completed
     attested: bool,
+}
+
+impl Clone for TeeTransport {
+    fn clone(&self) -> Self {
+        // Create a new instance with the same configuration but no active connection
+        Self {
+            connection: None, // Connection is not cloneable, so we create a disconnected clone
+            remote_address: self.remote_address.clone(),
+            request_id: AtomicU64::new(self.request_id.load(Ordering::SeqCst)),
+            tee_type: self.tee_type,
+            attested: self.attested,
+        }
+    }
 }
 
 /// Supported TEE types
@@ -53,11 +68,11 @@ impl TeeTransport {
     }
     
     /// Connect to the remote TEE
-    pub async fn connect(&mut self) -> Result<(), Error> {
+    pub async fn connect(&mut self) -> Result<()> {
         info!("Connecting to remote TEE at {}", self.remote_address);
         
         let stream = TcpStream::connect(&self.remote_address).await
-            .map_err(|e| Error::Connection(format!("Failed to connect to {}: {}", self.remote_address, e)))?;
+            .map_err(|e| ProtocolError::Connection(format!("Failed to connect to {}: {}", self.remote_address, e)))?;
             
         self.connection = Some(stream);
         debug!("Connected to {}", self.remote_address);
@@ -66,7 +81,7 @@ impl TeeTransport {
     }
     
     /// Perform attestation verification with the remote TEE
-    pub async fn attest(&mut self) -> Result<(), Error> {
+    pub async fn attest(&mut self) -> Result<()> {
         debug!("Starting attestation with remote TEE using {:?}", self.tee_type);
         
         let attestation_data = match self.tee_type {
@@ -82,8 +97,8 @@ impl TeeTransport {
         
         // Receive attestation response
         let response = self.receive_raw().await?;
-        if response.header.msg_type != MessageType::Attestation {
-            return Err(Error::Attestation("Unexpected response type for attestation".to_string()));
+        if response.0.msg_type != MessageType::Attestation {
+            return Err(crate::error::ClientError::Protocol(ProtocolError::Attestation("Unexpected response type for attestation response".to_string())));
         }
         
         // Verify attestation response
@@ -100,13 +115,13 @@ impl TeeTransport {
     }
     
     /// Send a message to the remote TEE
-    pub async fn send_message<T: Serialize>(&mut self, message: &Message<T>) -> Result<(), Error> {
+    pub async fn send_message<T: Serialize>(&mut self, message: &Message<T>) -> Result<()> {
         let connection = self.connection.as_mut()
-            .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
+            .ok_or_else(|| ProtocolError::Connection("Not connected".to_string()))?;
             
         let encoded = message.encode()?;
         connection.write_all(&encoded).await
-            .map_err(|e| Error::Connection(format!("Failed to send message: {}", e)))?;
+            .map_err(|e| ProtocolError::Connection(format!("Failed to send message: {}", e)))?;
             
         trace!("Sent message type {:?}, length {}", message.header.msg_type, message.header.length);
         
@@ -114,16 +129,16 @@ impl TeeTransport {
     }
     
     /// Receive a raw message from the remote TEE
-    async fn receive_raw(&mut self) -> Result<(MessageHeader, Bytes), Error> {
+    async fn receive_raw(&mut self) -> Result<(MessageHeader, Bytes)> {
         let connection = self.connection.as_mut()
-            .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
+            .ok_or_else(|| ProtocolError::Connection("Not connected".to_string()))?;
             
         // Read the header first
         let mut header_buf = BytesMut::with_capacity(MessageHeader::SIZE);
         header_buf.resize(MessageHeader::SIZE, 0);
         
         connection.read_exact(&mut header_buf).await
-            .map_err(|e| Error::Connection(format!("Failed to read message header: {}", e)))?;
+            .map_err(|e| ProtocolError::Connection(format!("Failed to read message header: {}", e)))?;
             
         let header = MessageHeader::decode(&mut header_buf)?;
         
@@ -132,7 +147,7 @@ impl TeeTransport {
         payload_buf.resize(header.length as usize, 0);
         
         connection.read_exact(&mut payload_buf).await
-            .map_err(|e| Error::Connection(format!("Failed to read message payload: {}", e)))?;
+            .map_err(|e| ProtocolError::Connection(format!("Failed to read message payload: {}", e)))?;
             
         trace!("Received message type {:?}, length {}", header.msg_type, header.length);
         
@@ -140,21 +155,22 @@ impl TeeTransport {
     }
     
     /// Receive and decode a message from the remote TEE
-    pub async fn receive<T: for<'de> Deserialize<'de>>(&mut self) -> Result<Message<T>, Error> {
+    pub async fn receive<T: DeserializeOwned>(&mut self) -> Result<Message<T>> {
         let (header, payload) = self.receive_raw().await?;
         
-        let message = Message::decode(header, &payload)?;
+        // payload is already a Bytes type, so we can use it directly
+        let message = Message::decode(header, payload.as_ref())?;
         
         Ok(message)
     }
     
     /// Send a request and wait for the response
-    pub async fn request<Req: Serialize, Resp: for<'de> Deserialize<'de>>(
+    pub async fn request<Req: Serialize, Resp: DeserializeOwned>(
         &mut self, 
         payload: Req
-    ) -> Result<Resp, Error> {
+    ) -> Result<Resp> {
         if !self.attested {
-            return Err(Error::Attestation("Attestation not completed".to_string()));
+            return Err(crate::error::ClientError::Protocol(ProtocolError::Attestation("Attestation not completed".to_string())));
         }
         
         let request_id = self.next_request_id();
@@ -165,11 +181,11 @@ impl TeeTransport {
         let response = self.receive::<Resp>().await?;
         
         if response.header.request_id != request_id {
-            return Err(Error::Protocol(format!(
+            return Err(crate::error::ClientError::Protocol(ProtocolError::Violation(format!(
                 "Response ID mismatch: expected {}, got {}", 
                 request_id, 
                 response.header.request_id
-            )));
+            ))));
         }
         
         Ok(response.payload)
@@ -182,7 +198,7 @@ impl TeeTransport {
     
     /// Create attestation data for Intel SGX
     #[cfg(feature = "sgx")]
-    fn create_sgx_attestation_data(&self) -> Result<Vec<u8>, Error> {
+    fn create_sgx_attestation_data(&self) -> Result<Vec<u8>> {
         use sgx_types::*;
         
         // Implementation would use the SGX SDK to generate a DCAP quote
@@ -197,14 +213,14 @@ impl TeeTransport {
     }
     
     #[cfg(not(feature = "sgx"))]
-    fn create_sgx_attestation_data(&self) -> Result<Vec<u8>, Error> {
+    fn create_sgx_attestation_data(&self) -> Result<Vec<u8>> {
         warn!("SGX support not enabled, using mock attestation data");
         Ok(vec![0u8; 1024])
     }
     
     /// Create attestation data for AMD SEV
     #[cfg(feature = "sev")]
-    fn create_sev_attestation_data(&self) -> Result<Vec<u8>, Error> {
+    fn create_sev_attestation_data(&self) -> Result<Vec<u8>> {
         use sev_snp_types::*;
         
         // Implementation would use the SEV-SNP APIs to generate attestation
@@ -219,14 +235,14 @@ impl TeeTransport {
     }
     
     #[cfg(not(feature = "sev"))]
-    fn create_sev_attestation_data(&self) -> Result<Vec<u8>, Error> {
+    fn create_sev_attestation_data(&self) -> Result<Vec<u8>> {
         warn!("SEV support not enabled, using mock attestation data");
         Ok(vec![0u8; 1024])
     }
     
     /// Verify SGX attestation response
     #[cfg(feature = "sgx")]
-    fn verify_sgx_attestation_response(&self, data: &[u8]) -> Result<(), Error> {
+    fn verify_sgx_attestation_response(&self, data: &[u8]) -> Result<()> {
         use sgx_types::*;
         
         // Implementation would verify the DCAP quote from the remote enclave
@@ -241,14 +257,14 @@ impl TeeTransport {
     }
     
     #[cfg(not(feature = "sgx"))]
-    fn verify_sgx_attestation_response(&self, _data: &[u8]) -> Result<(), Error> {
+    fn verify_sgx_attestation_response(&self, _data: &[u8]) -> Result<()> {
         warn!("SGX support not enabled, skipping attestation verification");
         Ok(())
     }
     
     /// Verify SEV attestation response
     #[cfg(feature = "sev")]
-    fn verify_sev_attestation_response(&self, data: &[u8]) -> Result<(), Error> {
+    fn verify_sev_attestation_response(&self, data: &[u8]) -> Result<()> {
         use sev_snp_types::*;
         
         // Implementation would verify the SEV-SNP attestation report
@@ -263,16 +279,16 @@ impl TeeTransport {
     }
     
     #[cfg(not(feature = "sev"))]
-    fn verify_sev_attestation_response(&self, _data: &[u8]) -> Result<(), Error> {
+    fn verify_sev_attestation_response(&self, _data: &[u8]) -> Result<()> {
         warn!("SEV support not enabled, skipping attestation verification");
         Ok(())
     }
     
     /// Close the connection
-    pub async fn close(&mut self) -> Result<(), Error> {
+    pub async fn close(&mut self) -> Result<()> {
         if let Some(mut connection) = self.connection.take() {
             connection.shutdown().await
-                .map_err(|e| Error::Connection(format!("Failed to close connection: {}", e)))?;
+                .map_err(|e| ProtocolError::Connection(format!("Failed to close connection: {}", e)))?;
                 
             debug!("Closed connection to {}", self.remote_address);
         }

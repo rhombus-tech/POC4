@@ -10,6 +10,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3"  # Efficient binary serialization
 bytes = "1.4"    # For efficient byte handling
+byteorder = "1.4" # For byte order handling in ITCH protocol
 
 # Async runtime
 tokio = { version = "1", features = ["full", "net"] }
@@ -25,7 +26,7 @@ ring = "0.16"    # Additional cryptographic primitives
 
 # TEE-specific libraries
 sgx_types = { version = "1.1", optional = true }       # For Intel SGX support
-sev_snp_types = { version = "0.1", optional = true }   # For AMD SEV support
+sev_snp_types = { path = "../mock-sev-snp-types", optional = true }   # Mock AMD SEV support for testing
 
 # Logging and tracing
 tracing = "0.1"
@@ -35,11 +36,29 @@ tracing-subscriber = "0.3"
 prost = "0.11"   # Protocol Buffers implementation for Rust
 tonic = "0.9"    # gRPC implementation for efficient communication
 
+# HTTP Client (optional)
+reqwest = { version = "0.11", features = ["json"], optional = true }
+
+# Random number generation
+rand = "0.8"   # For random functionality
+
 [features]
-default = ["sgx"]
+default = ["http"]
+
+# TEE-specific features
 sgx = ["sgx_types"]
-sev = ["sev_snp_types"]
+sev = ["dep:sev_snp_types"]
 all-tee = ["sgx", "sev"]
+
+# Functionality features
+http = ["dep:reqwest"]
+wasm-runtime = []
+market-data = []
+
+# Development and testing profiles
+simulation = ["market-data"]
+production = ["all-tee", "market-data", "wasm-runtime"]
+test-itch = ["market-data"]
 
 [dev-dependencies]
 tokio-test = "0.4"

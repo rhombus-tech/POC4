@@ -43,6 +43,22 @@ pub enum ProtocolError {
     #[error("Region communication error: {0}")]
     RegionCommunication(String),
     
+    /// Request timed out
+    #[error("Request timed out")]
+    Timeout,
+    
+    /// Connection error
+    #[error("Connection error: {0}")]
+    Connection(String),
+    
+    /// Attestation error
+    #[error("Attestation error: {0}")]
+    Attestation(String),
+
+    /// Protocol violation
+    #[error("Protocol violation: {0}")]
+    Violation(String),
+    
     /// Cross-regional verification failed
     #[error("Cross-regional verification failed: {0}")]
     VerificationFailed(String),
@@ -66,6 +82,14 @@ pub enum AdapterError {
     /// API response parsing failed
     #[error("API response parsing failed: {0}")]
     ResponseParsing(String),
+    
+    /// Request preparation failed
+    #[error("Request preparation failed: {0}")]
+    RequestPreparation(String),
+    
+    /// Other errors
+    #[error("{0}")]
+    Others(String),
 }
 
 /// Errors that can occur during attestation

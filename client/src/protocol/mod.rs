@@ -10,7 +10,7 @@
  * handling for WebAssembly contracts.
  */
 
-mod types;
+pub mod types;
 mod client;
 mod binary_protocol;
 mod tee_transport;
