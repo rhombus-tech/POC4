@@ -172,6 +172,9 @@ pub enum MessagePayload {
     OrderReplace(OrderReplaceMessage),
     Trade(TradeMessage),
     CrossTrade(CrossTradeMessage),
+    NOII(NOIIMessage),
+    RPII(RPIIMessage),
+    LULDAuctionCollar(LULDAuctionCollarMessage),
     Unknown,
 }
 
@@ -275,9 +278,40 @@ pub struct TradeMessage {
 pub struct CrossTradeMessage {
     pub shares: u64,
     pub stock: String,
-    pub cross_price: u64, // Price in 10^-4 dollars
+    pub price: u64, // Price in 10^-4 dollars
     pub match_number: u64,
     pub cross_type: u8,
+}
+
+/// Net Order Imbalance Indicator message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NOIIMessage {
+    pub stock: String,
+    pub paired_shares: u64,
+    pub imbalance_shares: u64,
+    pub imbalance_direction: u8,
+    pub far_price: u64,
+    pub near_price: u64,
+    pub current_reference_price: u64,
+    pub cross_type: u8,
+    pub price_variation_indicator: u8,
+}
+
+/// Retail Price Improvement Indicator message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RPIIMessage {
+    pub stock: String,
+    pub interest_flag: u8,
+}
+
+/// LULD Auction Collar message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LULDAuctionCollarMessage {
+    pub stock: String,
+    pub auction_collar_reference_price: u64,
+    pub upper_auction_collar_price: u64,
+    pub lower_auction_collar_price: u64,
+    pub auction_collar_extension: u32,
 }
 
 /// Details about an order in the book

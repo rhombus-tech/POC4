@@ -9,16 +9,19 @@
  * 2. Processing of all order-related message types
  * 3. Price level tracking with microsecond precision
  */
-use rand::prelude::SliceRandom;
-use rand::thread_rng;
+use rand::prelude::{SliceRandom, StdRng};
+use rand::{thread_rng, Rng, SeedableRng};
 use std::collections::HashMap;
 use anyhow::{Result, anyhow};
 use std::time::{Instant, UNIX_EPOCH, SystemTime};
 
 use aristo_client::itch::types::{ITCHMessage, MessageType, MessagePayload, BuySellIndicator, OrderBook};
 use aristo_client::itch::types::{AddOrderMessage, OrderExecutedMessage, OrderCancelMessage, OrderDeleteMessage};
+use aristo_client::itch::types::{SystemEventMessage, SystemEventCode, StockDirectoryMessage, TradingActionMessage};
+use aristo_client::itch::types::{NOIIMessage, RPIIMessage, LULDAuctionCollarMessage, TradingState};
 use aristo_client::itch::book::OrderBookReconstructor;
 use aristo_client::protocol::types::ParameterFormat;
+use aristo_client::protocol::WasmParameterHandler;
 
 /// A simplified parser for ITCH messages (binary format)
 pub struct SimplifiedITCHParser {}
@@ -35,17 +38,30 @@ impl SimplifiedITCHParser {
         
         // First byte is message type
         let message_type = match data[0] {
+            b'S' => MessageType::SystemEvent,
+            b'R' => MessageType::StockDirectory,
+            b'H' => MessageType::TradingAction,
             b'A' => MessageType::AddOrder,
+            b'F' => MessageType::AddOrderWithMPID,
             b'E' => MessageType::OrderExecuted,
+            b'C' => MessageType::OrderExecutedWithPrice,
             b'X' => MessageType::OrderCancel,
             b'D' => MessageType::OrderDelete,
+            b'U' => MessageType::OrderReplace,
             b'P' => MessageType::Trade,
+            b'Q' => MessageType::CrossTrade,
+            b'I' => MessageType::NOII,
+            b'N' => MessageType::RPII,
+            b'J' => MessageType::LULDAuctionCollar,
             _ => match data[0] {
                 0 => MessageType::AddOrder,
                 1 => MessageType::OrderExecuted,
                 2 => MessageType::OrderCancel,
                 3 => MessageType::OrderDelete,
                 4 => MessageType::Trade,
+                5 => MessageType::SystemEvent,
+                6 => MessageType::StockDirectory,
+                7 => MessageType::TradingAction,
                 _ => MessageType::UnknownType,
             }
         };
@@ -57,6 +73,95 @@ impl SimplifiedITCHParser {
         
         // Parse payload based on message type
         let (stock, payload) = match message_type {
+            MessageType::SystemEvent => {
+                if data.len() < 11 {  // 9 bytes header + 2 bytes payload
+                    return Err(anyhow::anyhow!("System event message too short"));
+                }
+                
+                let event_code = match data[9] {
+                    b'O' => SystemEventCode::StartOfMessages,
+                    b'S' => SystemEventCode::StartOfSystemHours,
+                    b'Q' => SystemEventCode::StartOfMarketHours,
+                    b'M' => SystemEventCode::EndOfMarketHours,
+                    b'E' => SystemEventCode::EndOfSystemHours,
+                    b'C' => SystemEventCode::EndOfMessages,
+                    _ => SystemEventCode::Unknown,
+                };
+                
+                (None, MessagePayload::SystemEvent(SystemEventMessage {
+                    event_code,
+                }))
+            },
+            MessageType::StockDirectory => {
+                if data.len() < 20 {  // Minimum length for stock directory
+                    return Err(anyhow::anyhow!("Stock directory message too short"));
+                }
+                
+                // Extract stock symbol
+                let mut stock = [0u8; 8];
+                stock.copy_from_slice(&data[9..17]);
+                let stock_str = std::str::from_utf8(&stock)
+                    .unwrap_or("UNKNOWN")
+                    .trim_end_matches(char::from(0))
+                    .to_string();
+                
+                // Market category
+                let market_category = data[17];
+                
+                // Financial status indicator
+                let financial_status_indicator = data[18];
+                
+                // Round lot size
+                let round_lot_size = 100; // Default for NASDAQ
+                
+                (Some(stock_str.clone()), MessagePayload::StockDirectory(StockDirectoryMessage {
+                    stock: stock_str.clone(),
+                    market_category: market_category,
+                    financial_status_indicator: financial_status_indicator,
+                    round_lot_size: round_lot_size,
+                    round_lots_only: false,   // Default
+                    issue_classification: 0, // Default
+                    issue_sub_type: [0; 2], // Simplified for this example
+                    authenticity: 0,         // Default
+                    short_sale_threshold_indicator: false, // Default
+                    ipo_flag: false,         // Default
+                    luld_reference_price_tier: 0, // Default
+                    etp_flag: false,         // Default
+                    etp_leverage_factor: 0,  // Default
+                    inverse_indicator: false, // Default
+                }))
+            },
+            MessageType::TradingAction => {
+                if data.len() < 18 {  // Minimum length for trading action
+                    return Err(anyhow::anyhow!("Trading action message too short"));
+                }
+                
+                // Extract stock symbol
+                let mut stock = [0u8; 8];
+                stock.copy_from_slice(&data[9..17]);
+                let stock_str = std::str::from_utf8(&stock)
+                    .unwrap_or("UNKNOWN")
+                    .trim_end_matches(char::from(0))
+                    .to_string();
+                
+                // Trading state
+                let trading_state = match data[17] {
+                    b'H' => TradingState::Halted,
+                    b'P' => TradingState::Paused,
+                    b'Q' => TradingState::Halted, // Using Halted as a replacement
+                    b'T' => TradingState::Trading,
+                    _ => TradingState::Unknown,
+                };
+                
+                // Reason (simplified)
+                let reason = [data[18], 0, 0, 0]; // Creating a [u8; 4] array
+                
+                (Some(stock_str.clone()), MessagePayload::TradingAction(TradingActionMessage {
+                    stock: stock_str,
+                    trading_state,
+                    reason,
+                }))
+            },
             MessageType::AddOrder => {
                 if data.len() < 25 {
                     return Err(anyhow::anyhow!("Add order message too short"));
@@ -249,22 +354,29 @@ impl SymbolScenario {
 }
 
 /// Message generator for realistic order book scenarios
-struct MessageGenerator {
+pub struct MessageGenerator {
     /// Scenarios for different symbols
     scenarios: HashMap<String, SymbolScenario>,
-    /// Current timestamp in nanoseconds
+    
+    /// Current timestamp in microseconds
     current_timestamp: u64,
-    /// Timestamp increment per message in nanoseconds
+    
+    /// Timestamp increment between messages (in microseconds)
     timestamp_increment: u64,
-    /// Next order ID counter
+    
+    /// Next available order ID
     next_order_id: u64,
-    /// Active orders
+    
+    /// Active orders for execution/cancellation
     active_orders: Vec<u64>,
+    
+    /// Random number generator for message generation
+    rng: StdRng,
 }
 
 impl MessageGenerator {
     /// Create a new message generator
-    fn new() -> Self {
+    pub fn new() -> Self {
         let mut scenarios = HashMap::new();
         
         // Create test scenarios for different symbols with varying price points
@@ -283,6 +395,7 @@ impl MessageGenerator {
             timestamp_increment: 100, // 100 microseconds between messages
             next_order_id: 1,
             active_orders: Vec::new(),
+            rng: StdRng::seed_from_u64(42), // Use fixed seed for reproducibility
         }
     }
     
@@ -370,38 +483,151 @@ impl MessageGenerator {
     }
 
     /// Generate a complex order book scenario with multiple price levels for multiple symbols
-    fn generate_complex_order_book_scenario(&mut self, total_orders: u32) -> Vec<ITCHMessage> {
+    pub fn generate_complex_order_book_scenario(&mut self, total_orders: u32) -> Vec<ITCHMessage> {
         let mut messages = Vec::new();
-        let symbols = vec!["AAPL", "MSFT", "GOOG", "AMZN"];
-        let orders_per_symbol = total_orders / (symbols.len() as u32 * 2); // Half for bids, half for asks
+        let symbols = ["AAPL", "MSFT", "GOOG", "AMZN"];
         
-        for symbol in symbols {
-            // For proper order book construction, ensure bids are LOWER than asks
-            // with a reasonable spread between them
+        // Start with system event message
+        
+        // System event - start of day
+        messages.push(ITCHMessage {
+            message_type: MessageType::SystemEvent,
+            timestamp: self.current_timestamp,
+            stock: None,
+            payload: MessagePayload::SystemEvent(SystemEventMessage {
+                event_code: SystemEventCode::StartOfSystemHours,
+            }),
+        });
+        
+        self.current_timestamp += self.timestamp_increment;
+        
+        // Stock directory entries
+        for symbol in symbols.iter() {
+            messages.push(ITCHMessage {
+                message_type: MessageType::StockDirectory,
+                timestamp: self.current_timestamp,
+                stock: Some(symbol.to_string()),
+                payload: MessagePayload::StockDirectory(StockDirectoryMessage {
+                    stock: symbol.to_string(),
+                    market_category: b'Q', // NASDAQ Global Select Market
+                    financial_status_indicator: b'N', // Normal
+                    round_lot_size: 100,
+                    round_lots_only: false,
+                    issue_classification: 0,
+                    issue_sub_type: [0; 2],
+                    authenticity: 0,
+                    short_sale_threshold_indicator: false, // Default
+                    ipo_flag: false,            // Default
+                    luld_reference_price_tier: 1, // Tier 1 NMS stock
+                    etp_flag: false,            // Default
+                    etp_leverage_factor: 0,
+                    inverse_indicator: false,    // Default
+                }),
+            });
             
-            // Generate bids (buy orders) - prices around 7000-7050
-            for i in 0..orders_per_symbol {
-                // Create buy orders at lower price levels (ensure they're below asks)
-                // No need to calculate price_level here as it's handled in generate_add_order
-                let size = 100 + (i % 5) * 25;
-                messages.push(self.generate_add_order(symbol, true, i as u32, size));
-                
-                // Keep track of the order IDs to use them later for executions, cancels, etc.
-                if let MessagePayload::AddOrder(add_order) = &messages.last().unwrap().payload {
-                    self.active_orders.push(add_order.order_reference_number);
+            // Trading actions - open for trading
+            messages.push(ITCHMessage {
+                message_type: MessageType::TradingAction,
+                timestamp: self.current_timestamp,
+                stock: Some(symbol.to_string()),
+                payload: MessagePayload::TradingAction(TradingActionMessage {
+                    stock: symbol.to_string(),
+                    trading_state: TradingState::Trading,
+                    reason: [0, 0, 0, 0], // Standard market open
+                }),
+            });
+        }
+        
+        // After stock directory messages, add specialized market data messages
+        
+        // NOII message for the first symbol
+        if !symbols.is_empty() {
+            let symbol = symbols[0].to_string();
+            messages.push(ITCHMessage {
+                message_type: MessageType::NOII,
+                timestamp: self.current_timestamp,
+                stock: Some(symbol.clone()),
+                payload: MessagePayload::NOII(NOIIMessage {
+                    paired_shares: 50000,
+                    imbalance_shares: 2000,
+                    imbalance_direction: b'B', // Buy imbalance
+                    far_price: 150000,
+                    near_price: 149750,
+                    current_reference_price: 149850,
+                    cross_type: b'O', // Opening cross
+                    price_variation_indicator: b'L', // Less than 1%
+                    stock: symbol,
+                }),
+            });
+            self.current_timestamp += self.timestamp_increment;
+        }
+        
+        // RPII message for the second symbol
+        if symbols.len() > 1 {
+            let symbol = symbols[1].to_string();
+            messages.push(ITCHMessage {
+                message_type: MessageType::RPII,
+                timestamp: self.current_timestamp,
+                stock: Some(symbol.clone()),
+                payload: MessagePayload::RPII(RPIIMessage {
+                    stock: symbol,
+                    interest_flag: b'B', // Buy side RPI
+                }),
+            });
+            self.current_timestamp += self.timestamp_increment;
+        }
+        
+        // LULD Auction Collar message for the third symbol
+        if symbols.len() > 2 {
+            let symbol = symbols[2].to_string();
+            messages.push(ITCHMessage {
+                message_type: MessageType::LULDAuctionCollar,
+                timestamp: self.current_timestamp,
+                stock: Some(symbol.clone()),
+                payload: MessagePayload::LULDAuctionCollar(LULDAuctionCollarMessage {
+                    stock: symbol,
+                    auction_collar_reference_price: 12500,
+                    upper_auction_collar_price: 13750, // 10% above reference
+                    lower_auction_collar_price: 11250, // 10% below reference
+                    auction_collar_extension: 30, // 30 seconds
+                }),
+            });
+            self.current_timestamp += self.timestamp_increment;
+        }
+        
+        // Add order setup for each symbol
+        let mut remaining_orders = total_orders;
+        
+        for symbol in symbols.iter() {
+            // Create orders spread across 5 price levels
+            let orders_per_symbol = remaining_orders.min(30) / 10;
+            remaining_orders -= orders_per_symbol * 10;
+            
+            for level in 1..=5 {
+                // Bid orders at this level
+                for _ in 0..orders_per_symbol {
+                    let size = self.rng.gen_range(100..500);
+                    let message = self.generate_add_order(symbol, true, level, size);
+                    
+                    // Add the order ID to active orders for later use
+                    if let MessagePayload::AddOrder(add_order) = &message.payload {
+                        self.active_orders.push(add_order.order_reference_number);
+                    }
+                    
+                    messages.push(message);
                 }
-            }
-            
-            // Generate asks (sell orders) - prices around 7060-7110 (10 tick spread)
-            for i in 0..orders_per_symbol {
-                // Create sell orders at higher price levels (ensure they're above bids)
-                // No need to calculate price_level here as it's handled in generate_add_order
-                let size = 100 + (i % 5) * 50;
-                messages.push(self.generate_add_order(symbol, false, i as u32, size));
                 
-                // Keep track of the order IDs
-                if let MessagePayload::AddOrder(add_order) = &messages.last().unwrap().payload {
-                    self.active_orders.push(add_order.order_reference_number);
+                // Ask orders at this level
+                for _ in 0..orders_per_symbol {
+                    let size = self.rng.gen_range(100..500);
+                    let message = self.generate_add_order(symbol, false, level, size);
+                    
+                    // Add the order ID to active orders for later use
+                    if let MessagePayload::AddOrder(add_order) = &message.payload {
+                        self.active_orders.push(add_order.order_reference_number);
+                    }
+                    
+                    messages.push(message);
                 }
             }
             
@@ -422,7 +648,7 @@ impl MessageGenerator {
         for symbol in &symbols {
             println!("Generating market updates for symbol: {}", symbol);
             for _ in 0..messages_per_symbol {
-                let random_value = rand::random::<f64>();
+                let random_value = self.rng.gen::<f64>();
                 
                 if random_value < 0.6 {
                     // 60% chance to add a new order

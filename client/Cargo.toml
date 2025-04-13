@@ -77,3 +77,7 @@ required-features = ["market-data"]
 [[example]]
 name = "order_book_test"
 required-features = ["market-data"]
+
+[[example]]
+name = "feed_sync_test"
+required-features = ["market-data"]

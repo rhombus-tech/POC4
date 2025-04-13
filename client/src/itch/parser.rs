@@ -149,6 +149,24 @@ impl ITCHParser {
                     payload,
                 }
             },
+            MessageType::OrderExecutedWithPrice => {
+                let payload = self.parse_order_executed_with_price(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: None, // No direct stock info in payload
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::OrderCancel => {
+                let payload = self.parse_order_cancel(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: None, // No direct stock info in payload
+                    timestamp,
+                    payload,
+                }
+            },
             MessageType::OrderDelete => {
                 let payload = self.parse_order_delete(&mut cursor)?;
                 
@@ -168,6 +186,60 @@ impl ITCHParser {
                 ITCHMessage {
                     message_type,
                     stock,
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::OrderReplace => {
+                let payload = self.parse_order_replace(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: None, // No direct stock info in payload
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::Trade => {
+                let (stock, payload) = self.parse_trade(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: Some(stock),
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::CrossTrade => {
+                let (stock, payload) = self.parse_cross_trade(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: Some(stock),
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::NOII => {
+                let (stock, payload) = self.parse_noii(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: Some(stock),
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::RPII => {
+                let (stock, payload) = self.parse_rpii(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: Some(stock),
+                    timestamp,
+                    payload,
+                }
+            },
+            MessageType::LULDAuctionCollar => {
+                let (stock, payload) = self.parse_luld_auction_collar(&mut cursor)?;
+                ITCHMessage {
+                    message_type,
+                    stock: Some(stock),
                     timestamp,
                     payload,
                 }
@@ -396,6 +468,138 @@ impl ITCHParser {
         }))
     }
     
+    /// Parse Order Executed With Price message
+    fn parse_order_executed_with_price(&self, cursor: &mut Cursor<&[u8]>) -> Result<MessagePayload> {
+        let order_reference_number = cursor.read_u64::<BigEndian>()?;
+        let executed_shares = cursor.read_u32::<BigEndian>()?;
+        let match_number = cursor.read_u64::<BigEndian>()?;
+        let printable = cursor.read_u8()?;
+        let execution_price = cursor.read_u64::<BigEndian>()?;
+
+        Ok(MessagePayload::OrderExecutedWithPrice(OrderExecutedWithPriceMessage {
+            order_reference_number,
+            executed_shares,
+            match_number,
+            printable: printable != 0,
+            execution_price,
+        }))
+    }
+
+    /// Parse Order Cancel message
+    fn parse_order_cancel(&self, cursor: &mut Cursor<&[u8]>) -> Result<MessagePayload> {
+        let order_reference_number = cursor.read_u64::<BigEndian>()?;
+        let cancelled_shares = cursor.read_u32::<BigEndian>()?;
+
+        Ok(MessagePayload::OrderCancel(OrderCancelMessage {
+            order_reference_number,
+            cancelled_shares,
+        }))
+    }
+
+    /// Parse Order Replace message
+    fn parse_order_replace(&self, cursor: &mut Cursor<&[u8]>) -> Result<MessagePayload> {
+        let original_order_reference_number = cursor.read_u64::<BigEndian>()?;
+        let new_order_reference_number = cursor.read_u64::<BigEndian>()?;
+        let shares = cursor.read_u32::<BigEndian>()?;
+        let price = cursor.read_u64::<BigEndian>()?;
+
+        Ok(MessagePayload::OrderReplace(OrderReplaceMessage {
+            original_order_reference_number,
+            new_order_reference_number,
+            shares,
+            price,
+        }))
+    }
+
+    /// Parse Trade message
+    fn parse_trade(&self, cursor: &mut Cursor<&[u8]>) -> Result<(String, MessagePayload)> {
+        let stock = self.read_stock(cursor)?;
+        let order_reference_number = cursor.read_u64::<BigEndian>()?;
+        let buy_sell_indicator = BuySellIndicator::from(cursor.read_u8()?);
+        let shares = cursor.read_u32::<BigEndian>()?;
+        let price = cursor.read_u64::<BigEndian>()?;
+        let match_number = cursor.read_u64::<BigEndian>()?;
+
+        Ok((stock.clone(), MessagePayload::Trade(TradeMessage {
+            stock,
+            order_reference_number,
+            buy_sell_indicator,
+            shares,
+            price,
+            match_number,
+        })))
+    }
+
+    /// Parse Cross Trade message
+    fn parse_cross_trade(&self, cursor: &mut Cursor<&[u8]>) -> Result<(String, MessagePayload)> {
+        let stock = self.read_stock(cursor)?;
+        let shares = cursor.read_u64::<BigEndian>()?;
+        let price = cursor.read_u64::<BigEndian>()?;
+        let match_number = cursor.read_u64::<BigEndian>()?;
+        let cross_type = cursor.read_u8()?;
+
+        Ok((stock.clone(), MessagePayload::CrossTrade(CrossTradeMessage {
+            stock,
+            shares,
+            price,
+            match_number,
+            cross_type,
+        })))
+    }
+
+    /// Parse NOII (Net Order Imbalance Indicator) message
+    fn parse_noii(&self, cursor: &mut Cursor<&[u8]>) -> Result<(String, MessagePayload)> {
+        let stock = self.read_stock(cursor)?;
+        let paired_shares = cursor.read_u64::<BigEndian>()?;
+        let imbalance_shares = cursor.read_u64::<BigEndian>()?;
+        let imbalance_direction = cursor.read_u8()?;
+        let far_price = cursor.read_u64::<BigEndian>()?;
+        let near_price = cursor.read_u64::<BigEndian>()?;
+        let current_reference_price = cursor.read_u64::<BigEndian>()?;
+        let cross_type = cursor.read_u8()?;
+        let price_variation_indicator = cursor.read_u8()?;
+
+        Ok((stock.clone(), MessagePayload::NOII(NOIIMessage {
+            stock,
+            paired_shares,
+            imbalance_shares,
+            imbalance_direction,
+            far_price,
+            near_price,
+            current_reference_price,
+            cross_type,
+            price_variation_indicator,
+        })))
+    }
+
+    /// Parse RPII (Retail Price Improvement Indicator) message
+    fn parse_rpii(&self, cursor: &mut Cursor<&[u8]>) -> Result<(String, MessagePayload)> {
+        let stock = self.read_stock(cursor)?;
+        let interest_flag = cursor.read_u8()?;
+
+        Ok((stock.clone(), MessagePayload::RPII(RPIIMessage {
+            stock,
+            interest_flag,
+        })))
+    }
+
+    /// Parse LULD Auction Collar message
+    fn parse_luld_auction_collar(&self, cursor: &mut Cursor<&[u8]>) -> Result<(String, MessagePayload)> {
+        let stock = self.read_stock(cursor)?;
+        let auction_collar_reference_price = cursor.read_u64::<BigEndian>()?;
+        let upper_auction_collar_price = cursor.read_u64::<BigEndian>()?;
+        let lower_auction_collar_price = cursor.read_u64::<BigEndian>()?;
+        let auction_collar_extension = cursor.read_u32::<BigEndian>()?;
+
+        Ok((stock.clone(), MessagePayload::LULDAuctionCollar(LULDAuctionCollarMessage {
+            stock,
+            auction_collar_reference_price,
+            upper_auction_collar_price,
+            lower_auction_collar_price,
+            auction_collar_extension,
+        })))
+    }
+
     /// Get statistics about messages processed
     pub fn get_statistics(&self) -> HashMap<String, u64> {
         let mut stats = HashMap::new();

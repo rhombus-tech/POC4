@@ -10,12 +10,15 @@
  * handling for WebAssembly contracts.
  */
 
+pub mod binary_protocol;
+pub mod client;
 pub mod types;
-mod client;
-mod binary_protocol;
-mod tee_transport;
+pub mod tee_transport;
+pub mod wasm_parameters;
 
 // Re-export key components
+pub use types::ParameterFormat;
+pub use wasm_parameters::WasmParameterHandler;
 pub use client::ProtocolClient;
 pub use types::*;
 
