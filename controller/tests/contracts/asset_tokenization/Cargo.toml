@@ -1,0 +1,44 @@
+[package]
+name = "asset_tokenization"
+version = "0.1.0"
+edition = "2021"
+
+# Create a standalone workspace to avoid conflicts
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+std = ["wasmlanche/std", "borsh/std", "serde/std", "serde_json/std"]
+test = ["std", "wasmlanche/test"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wee_alloc = "0.4.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false }
+borsh = { version = "0.10.3", default-features = false }
+wasmlanche = { path = "../../../../../hyper/x/contracts/wasmlanche", default-features = false, features = [] }
+getrandom = { version = "0.2", features = ["js"] }
+
+
+[dev-dependencies]
+wasmlanche = { path = "../../../../../hyper/x/contracts/wasmlanche", features = ["std", "test"] }
+
+[build-dependencies]
+wasmlanche-build = { path = "../../../../../hyper/x/contracts/wasmlanche-build" }
+

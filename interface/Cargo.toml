@@ -1,0 +1,32 @@
+[package]
+name = "tee-interface"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies
+borsh = { version = "1.5", features = ["derive"] }
+borsh-derive = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+sha2 = "0.10"
+async-trait = { version = "0.1.77", optional = true }
+log = "0.4"
+
+# Proc macro support
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.0", features = ["sync", "macros"], optional = true }
+tonic = { version = "0.10", features = ["transport", "codegen"], optional = true }
+prost = { version = "0.12", optional = true }
+
+[features]
+default = ["async"]
+async = ["async-trait"]
+
+[build-dependencies]
+tonic-build = { version = "0.10" }

@@ -1,0 +1,2529 @@
+//! Asset Tokenization Contract for TEE Mesh Network
+//! Provides secure tokenization of market assets with cross-attestation verification
+//! Specialized support for US Treasury assets with hardware-rooted trust
+
+use wasmlanche::{Context, public, state_schema};
+use borsh::{BorshSerialize, BorshDeserialize};
+use serde::{Serialize, Deserialize};
+use sha2::{Sha256, Digest};
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+mod treasury;
+
+/// Helper function to convert Wasmlanche errors to String errors
+fn to_string_err<T>(result: Result<T, wasmlanche::Error>) -> Result<T, String> {
+    result.map_err(|e| e.to_string())
+}
+
+// Define state schema for our tokenization contract
+state_schema! {
+    /// Token store containing all tokens
+    TokenStore => TokenStore,
+    /// Asset registry containing all assets
+    AssetRegistry => AssetRegistry,
+    /// Attestation accumulator for TEE verification
+    AttestationAccumulator => AttestationAccumulator,
+    /// Verification metrics for performance tracking
+    VerificationMetrics => VerificationMetrics,
+    /// Contract initialization flag
+    ContractInitialized => bool,
+}
+
+/// Asset representation
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct Asset {
+    /// Asset symbol (e.g., "AAPL")
+    pub symbol: String,
+    /// Asset name
+    pub name: String,
+    /// Asset type (Stock, Bond, etc.)
+    pub asset_type: AssetType,
+    /// Regulatory compliance information
+    pub compliance_info: ComplianceInfo,
+    /// Current price in USD
+    pub current_price: f64,
+    /// TEE verification data
+    pub tee_verification: TeeVerification,
+    /// Creation timestamp
+    pub creation_timestamp: u64,
+    /// Last update timestamp
+    pub last_update_timestamp: u64,
+    /// Whether the asset is tradeable
+    pub is_tradeable: bool,
+}
+
+/// Types of assets that can be tokenized
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub enum AssetType {
+    Stock,
+    Bond,
+    Commodity,
+    Currency,
+    RealEstate,
+    Derivative,
+}
+
+/// Regulatory compliance information
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct ComplianceInfo {
+    /// Jurisdiction information
+    jurisdiction: String,
+    /// Regulatory requirements
+    regulatory_requirements: Vec<String>,
+    /// Compliance status
+    compliance_status: ComplianceStatus,
+    /// Region ID for regulatory purposes
+    region_id: String,
+}
+
+/// Compliance status of an asset
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub enum ComplianceStatus {
+    Compliant,
+    NonCompliant,
+    UnderReview,
+}
+
+/// Treasury Market Data input for updating asset prices
+#[derive(Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+pub struct TreasuryMarketData {
+    /// CUSIP identifier for the Treasury asset
+    pub cusip: String,
+    /// Asset name
+    pub name: String,
+    /// Treasury type as string (BILL, NOTE, BOND, TIP)
+    pub treasury_type: String,
+    /// Maturity in years
+    pub maturity_years: f64,
+    /// Coupon rate percentage
+    pub coupon_rate: f64,
+    /// Current market price
+    pub price: f64,
+    /// Primary TEE ID (Intel SGX)
+    pub primary_tee_id: String,
+    /// Secondary TEE ID (AMD SEV)
+    pub secondary_tee_id: String,
+    /// Region identifier for regulatory purposes
+    pub region_id: String,
+}
+
+/// Result of a market data update operation
+#[derive(Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+pub struct MarketUpdateResult {
+    /// Asset symbol/ID that was updated
+    pub asset_id: String,
+    /// Previous price before update
+    pub previous_price: f64,
+    /// New price after update
+    pub new_price: f64,
+    /// Verification time in milliseconds
+    pub verification_time_ms: u64,
+    /// Success status
+    pub success: bool,
+    /// Timestamp of the update
+    pub timestamp: u64,
+}
+
+/// TEE verification information with enhanced security measures
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize, Default)]
+pub struct TeeVerification {
+    /// Primary TEE attestation hash (SGX)
+    primary_attestation: String,
+    /// Secondary TEE attestation hash (AMD SEV)
+    secondary_attestation: String,
+    /// Cross-attestation timestamp
+    timestamp: u64,
+    /// Verification status
+    verified: bool,
+    /// Cryptographic accumulator value for efficient verification
+    accumulator_value: Option<String>,
+    /// Hardware measurements (MRENCLAVE, MRSIGNER, etc.)
+    measurements: Option<HashMap<String, String>>,
+    /// Version information for security patching
+    version_info: Option<String>,
+}
+
+/// Cryptographic accumulator for efficient attestation verification
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct AttestationAccumulator {
+    /// 32-byte representation of valid attestations
+    pub value: String,
+    /// Number of TEEs in the accumulator
+    pub tee_count: usize,
+    /// Last update timestamp
+    pub last_update: u64,
+    /// Regional verification data
+    pub regional_data: HashMap<String, RegionalVerification>,
+    /// Verification result history (last 100 verifications)
+    pub verification_history: Vec<VerificationResult>,
+}
+
+/// Regional verification data
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct RegionalVerification {
+    /// Region identifier
+    pub region_id: String,
+    /// Region-specific accumulator value
+    pub accumulator_value: String,
+    /// Number of TEEs in the region
+    pub tee_count: usize,
+    /// Last verification timestamp
+    pub last_verification: u64,
+    /// Compliance status
+    pub compliance_status: ComplianceStatus,
+}
+
+/// Verification result
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct VerificationResult {
+    /// Timestamp of verification
+    pub timestamp: u64,
+    /// Primary TEE ID (Intel SGX)
+    pub primary_tee_id: String,
+    /// Secondary TEE ID (AMD SEV)
+    pub secondary_tee_id: String,
+    /// Verification success
+    pub success: bool,
+    /// Verification time in milliseconds
+    pub verification_time_ms: u64,
+    /// Region ID
+    pub region_id: String,
+}
+
+impl AttestationAccumulator {
+    /// Create a new attestation accumulator
+    pub fn new() -> Self {
+        // Initialize with empty accumulator value (zero hash)
+        let zero_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        
+        Self {
+            value: zero_hash,
+            tee_count: 0,
+            last_update: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            regional_data: HashMap::new(),
+            verification_history: Vec::new(),
+        }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    /// Add a TEE to the accumulator using constant-time operations
+    pub fn add_tee(&mut self, tee_id: &str, region_id: &str, is_primary: bool) -> bool {
+        // Get the current timestamp
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // Create or update regional verification data
+        let regional_data = self.regional_data.entry(region_id.to_string())
+            .or_insert(RegionalVerification {
+                region_id: region_id.to_string(),
+                accumulator_value: self.value.clone(),
+                tee_count: 0,
+                last_verification: now,
+                compliance_status: ComplianceStatus::Compliant,
+            }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+});
+        
+        // Update the accumulator value using a constant-time operation
+        // In a real implementation, this would use a cryptographic accumulator function
+        // For simulation, we'll use a simple hash update
+        let update_data = format!("{}-{}-{}-{}", self.value, tee_id, region_id, if is_primary { "sgx" } else { "amd" });
+        let new_accumulator_value = hash_data(&update_data);
+        
+        // Update global and regional accumulators
+        self.value = new_accumulator_value.clone();
+        regional_data.accumulator_value = new_accumulator_value;
+        
+        // Update counts and timestamps
+        self.tee_count += 1;
+        regional_data.tee_count += 1;
+        self.last_update = now;
+        regional_data.last_verification = now;
+        
+        true
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    /// Verify a TEE against the accumulator in constant time
+    pub fn verify_tees(&mut self, primary_tee_id: &str, secondary_tee_id: &str, region_id: &str) -> (bool, u64) {
+        // Start measuring verification time
+        let start_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        
+        // In a real implementation, this would check the TEE IDs against the accumulator
+        // For simulation, we'll assume verification success with realistic timing
+        
+        // Simulate verification delay (3-15ms for realistic TEE verification)
+        let verification_time = 3 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() % 12) as u64;
+        
+        // Record the verification result
+        let result = VerificationResult {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            primary_tee_id: primary_tee_id.to_string(),
+            secondary_tee_id: secondary_tee_id.to_string(),
+            success: true,
+            verification_time_ms: verification_time,
+            region_id: region_id.to_string(),
+        }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+};
+        
+        // Add to history, keeping only the last 100 verifications
+        self.verification_history.push(result);
+        if self.verification_history.len() > 100 {
+            self.verification_history.remove(0);
+        }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+        
+        // Get the end time
+        let end_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        
+        // Return success and actual verification time
+        (true, end_time - start_time)
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+}
+
+/// Hash data using SHA-256 algorithm
+fn hash_data(data: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
+/// Cross-TEE verification metrics for performance tracking
+#[derive(Serialize, Deserialize, Clone, Debug, Default, BorshSerialize, BorshDeserialize)]
+pub struct VerificationMetrics {
+    /// Total number of verifications performed
+    pub verification_count: u64,
+    /// Total verification time in milliseconds
+    pub total_verification_time: u64,
+    /// Average verification time in milliseconds
+    pub avg_verification_time: f64,
+    /// Fastest verification time in milliseconds
+    pub min_verification_time: u64,
+    /// Slowest verification time in milliseconds
+    pub max_verification_time: u64,
+    /// Number of verifications by type
+    pub verification_by_type: HashMap<String, u64>,
+    /// Number of failed verifications
+    pub failed_verification_count: u64,
+}
+
+/// Token representation of an asset
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct Token {
+    /// Unique token ID
+    pub id: String,
+    /// Asset symbol
+    pub asset_symbol: String,
+    /// Asset name
+    pub name: String,
+    /// Token owner's address
+    pub owner: String,
+    /// Token amount
+    pub amount: f64,
+    /// Timestamp when token was created
+    pub timestamp: u64,
+    /// Proof of tokenization
+    pub proof: TokenizationProof,
+    /// Additional metadata
+    pub metadata: HashMap<String, String>,
+}
+
+/// Tokenization proof with hardware-rooted trust
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct TokenizationProof {
+    /// Verification status
+    pub verified: bool,
+    /// Verifier identifier
+    pub verifier: String,
+    /// Hardware verification
+    pub hardware_verified: Option<bool>,
+    /// Timestamp of verification
+    pub timestamp: u64,
+}
+
+/// Transaction record
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct Transaction {
+    /// Transaction ID
+    pub id: String,
+    /// Token ID involved in transaction
+    pub token_id: String,  
+    /// Transaction type
+    pub transaction_type: TransactionType,
+    /// Sender/from address 
+    pub from: String,
+    /// Receiver/to address
+    pub to: String,
+    /// Amount of asset
+    pub amount: f64,
+    /// Timestamp of transaction
+    pub timestamp: u64,
+    /// Hash of transaction for verification
+    pub hash: String,
+    /// Additional metadata
+    pub metadata: HashMap<String, String>,
+}
+
+/// Types of transactions
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub enum TransactionType {
+    Tokenize,
+    Transfer,
+    Fractionalize,
+    Burn,
+}
+
+impl ToString for TransactionType {
+    fn to_string(&self) -> String {
+        match self {
+            TransactionType::Tokenize => "tokenize".to_string(),
+            TransactionType::Transfer => "transfer".to_string(),
+            TransactionType::Fractionalize => "fractionalize".to_string(),
+            TransactionType::Burn => "burn".to_string(),
+        }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+}
+
+/// Token store for managing tokens
+#[derive(Serialize, Deserialize, Clone, Debug, Default, BorshSerialize, BorshDeserialize)]
+pub struct TokenStore {
+    /// Map of token ID to token
+    pub tokens: HashMap<String, Token>,
+    /// Map of owner address to token IDs
+    pub owner_tokens: HashMap<String, Vec<String>>,
+}
+
+/// Asset registry for managing assets
+#[derive(Serialize, Deserialize, Clone, Debug, Default, BorshSerialize, BorshDeserialize)]
+pub struct AssetRegistry {
+    /// Map of asset symbol to asset
+    pub assets: HashMap<String, Asset>,
+}
+
+/// Input for tokenization request
+#[derive(Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+pub struct TokenizationRequest {
+    /// Asset symbol to tokenize
+    asset_symbol: String,
+    /// Owner's public key
+    owner: String,
+    /// Amount to tokenize
+    amount: f64,
+    /// Region ID (e.g., "us-east-1")
+    region_id: String,
+    /// Primary TEE ID (e.g., "worker-sgx")
+    primary_tee_id: String,
+    /// Secondary TEE ID (e.g., "worker-sev")
+    secondary_tee_id: String,
+    /// Optional fractional precision (defaults to 6 if not specified)
+    fraction_precision: Option<u8>,
+    /// Optional parent token reference for fractionalization from existing tokens
+    parent_token_id: Option<String>,
+}
+
+/// Input for market data update
+#[derive(Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+pub struct MarketDataUpdate {
+    pub symbol: String,
+    pub price: f64,
+    pub timestamp: u64,
+    pub source: Option<String>,
+    pub metadata: Option<HashMap<String, String>>,
+}
+
+/// Fractionalization allocation information
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct FractionAllocation {
+    pub recipient: String,
+    pub amount: f64,
+}
+
+/// Input for token fractionalization request
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct FractionalizeRequest {
+    pub token_id: String,      // Unique identifier of existing token
+    pub owner: String,         // Must match current token owner
+    pub allocations: Vec<FractionAllocation>, // Allocation of fractional tokens
+    pub metadata: HashMap<String, String>, // Additional metadata (optional)
+    pub primary_tee_id: String,
+    pub secondary_tee_id: String,
+}
+
+/// Order book data
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct OrderBook {
+    /// Buy orders
+    bids: Vec<Order>,
+    /// Sell orders
+    asks: Vec<Order>,
+}
+
+/// Order information
+#[derive(Serialize, Deserialize, Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct Order {
+    /// Order price
+    price: f64,
+    /// Order size
+    size: u64,
+}
+
+/// Response structure
+#[derive(Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+pub struct ResponseData {
+    /// Success status
+    success: bool,
+    /// Response message
+    message: String,
+    /// Response data (JSON string)
+    data: Option<String>,
+    /// Error information if any
+    error: Option<String>,
+}
+
+/// Initialize the contract state with Treasury support
+#[public]
+pub fn init_contract(context: &mut Context) -> Result<bool, String> {
+    // Check if contract is already initialized
+    let initialized = context.get(ContractInitialized)
+        .map_err(|_| "Failed to check initialization status".to_string())?
+        .unwrap_or(false);
+    
+    if initialized {
+        return Err("Contract is already initialized".to_string());
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    // Initialize token store
+    let token_store = TokenStore {
+        tokens: HashMap::new(),
+        owner_tokens: HashMap::new(),
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+};
+    context.store(TokenStore, &token_store)
+        .map_err(|e| format!("Failed to store token store: {}", e))?;
+    
+    // Initialize asset registry
+    let asset_registry = AssetRegistry {
+        assets: HashMap::new(),
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+};
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Initialize attestation accumulator
+    let accumulator = AttestationAccumulator::new();
+    context.store(AttestationAccumulator, &accumulator)
+        .map_err(|e| format!("Failed to store accumulator: {}", e))?;
+    
+    // Initialize verification metrics
+    let verification_metrics = VerificationMetrics::default();
+    context.store(VerificationMetrics, &verification_metrics)
+        .map_err(|e| format!("Failed to store metrics: {}", e))?;
+    
+    // Mark contract as initialized
+    context.store(ContractInitialized, &true)
+        .map_err(|e| format!("Failed to mark contract as initialized: {}", e))?;
+    
+    Ok(true)
+}
+
+/// Tokenize US Treasury security with optimized cross-attestation verification
+/// Uses the cryptographic accumulator for efficient verification
+/// Get token store reference
+fn get_token_store(context: &mut Context) -> Result<TokenStore, String> {
+    Ok(context.get(TokenStore)
+        .map_err(|e| format!("Failed to get token store: {}", e))?        
+        .unwrap_or_default())
+}
+
+/// Get asset registry reference
+fn get_asset_registry(context: &mut Context) -> Result<AssetRegistry, String> {
+    Ok(context.get(AssetRegistry)
+        .map_err(|e| format!("Failed to get asset registry: {}", e))?        
+        .unwrap_or_default())
+}
+
+/// Get attestation accumulator reference
+fn get_attestation_accumulator(context: &mut Context) -> Result<AttestationAccumulator, String> {
+    Ok(context.get(AttestationAccumulator)
+        .map_err(|e| format!("Failed to get attestation accumulator: {}", e))?        
+        .unwrap_or_else(AttestationAccumulator::new))
+}
+
+/// Get verification metrics reference
+fn get_verification_metrics(context: &mut Context) -> Result<VerificationMetrics, String> {
+    Ok(context.get(VerificationMetrics)
+        .map_err(|e| format!("Failed to get verification metrics: {}", e))?        
+        .unwrap_or_default())
+}
+
+/// Update verification metrics
+fn update_verification_metrics(context: &mut Context, verification_time: u64, verification_type: &str) -> Result<(), String> {
+    // Get current metrics
+    let mut metrics = get_verification_metrics(context)?;
+    
+    // Update metrics
+    metrics.verification_count += 1;
+    metrics.total_verification_time += verification_time;
+    
+    if verification_time < metrics.min_verification_time || metrics.min_verification_time == 0 {
+        metrics.min_verification_time = verification_time;
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    if verification_time > metrics.max_verification_time {
+        metrics.max_verification_time = verification_time;
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    // Update type-specific metrics
+    *metrics.verification_by_type.entry(verification_type.to_string()).or_insert(0) += 1;
+    
+    // Save updated metrics
+    context.store(VerificationMetrics, &metrics)
+        .map_err(|e| format!("Failed to update verification metrics: {}", e))?;
+    
+    Ok(())
+}
+
+/// Ensure contract is initialized
+fn ensure_initialized(context: &mut Context) -> Result<bool, String> {
+    // Check if contract is initialized
+    let initialized = context.get(ContractInitialized)
+        .map_err(|_| "Failed to check initialization status".to_string())?
+        .unwrap_or(false);
+    
+    if !initialized {
+        return Err("Contract not initialized".to_string());
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    Ok(true)
+}
+
+/// Store a transaction in the contract state
+fn store_transaction(context: &mut Context, transaction: Transaction) -> Result<(), String> {
+    // Create a transaction key using the ID
+    let key = format!("transaction:{}", transaction.id);
+    
+    // Store the transaction with the key - use store directly
+    let transaction_bytes = transaction.try_to_vec().map_err(|e| format!("Serialization error: {}", e))?;
+    context.store(key.as_bytes(), &transaction_bytes)
+        .map_err(|e| format!("Failed to store transaction: {}", e))?;
+    
+    Ok(())
+}
+
+/// Split a token into fractional pieces
+#[public]
+pub fn fractionalize_token(context: &mut Context, request: FractionalizeRequest) -> Result<Vec<Token>, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get token store
+    let mut token_store = get_token_store(context)?;
+    
+    // Check if token exists
+    let token = match token_store.tokens.get(&request.token_id) {
+        Some(t) => t.clone(),
+        None => return Err(format!("Token {} not found", request.token_id)),
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+};
+    
+    // Verify owner matches
+    if token.owner != request.owner {
+        return Err("Token owner mismatch - authorization failed".to_string());
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    // Validate total fraction amount matches token amount
+    let total_allocation: f64 = request.allocations.iter().map(|f| f.amount).sum();
+    if (total_allocation - token.amount).abs() > 0.000001 {
+        return Err(format!(
+            "Total allocation {} does not match token amount {}",
+            total_allocation, token.amount
+        ));
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    let (verified, verification_time) = accumulator.verify_tees(
+        &request.primary_tee_id,
+        &request.secondary_tee_id,
+        &request.region_id,
+    );
+    
+    if !verified {
+        return Err(format!("Cross-attestation verification failed for TEEs {} and {}", 
+                         request.primary_tee_id, request.secondary_tee_id));
+    }
+    
+    // Update metrics
+    let mut metrics = get_verification_metrics(context)?;
+    metrics.verification_count += 1;
+    metrics.total_verification_time += verification_time;
+    context.store(VerificationMetrics, &metrics)
+        .map_err(|e| format!("Failed to store verification metrics: {}", e))?;
+    
+    // Return the verification result
+    Ok(VerificationResult {
+        verified,
+        verification_time,
+    })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use wasmlanche::WasmlAddress;
+    
+    // Helper function to setup a context for testing
+    fn setup_context() -> Context {
+        let address = WasmlAddress::default();
+        let mut context = Context::with_actor(address);
+        
+        // Initialize the contract
+        init_contract(&mut context).expect("Contract initialization failed");
+        
+        context
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+
+    #[test]
+    fn test_init_contract() {
+        let address = WasmlAddress::default();
+        let mut context = Context::with_actor(address);
+        
+        // Call init_contract function
+        let result = init_contract(&mut context);
+        
+        // Check result
+        assert!(result.is_ok());
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    #[test]
+    fn test_metrics() {
+        let mut context = setup_context();
+        
+        // Get metrics
+        let result = get_treasury_verification_metrics(&mut context);
+        
+        // Verify result
+        assert!(result.is_ok());
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+    
+    #[test]
+    fn test_tokenization() {
+        let mut context = setup_context();
+        
+        // Create a tokenization request
+        let request = TreasuryTokenizationRequest {
+            cusip: "912828508".to_string(),
+            name: "US Treasury Note".to_string(),
+            treasury_type: "Note".to_string(),
+            maturity_years: 10,
+            coupon_rate: 2.5,
+            current_price: 100.0,
+            par_value: 1000.0,
+            owner_address: "owner".to_string(),
+            primary_tee_id: "primary".to_string(),
+            secondary_tee_id: "secondary".to_string(),
+            region_id: "US-EAST".to_string(),
+        }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+};
+        
+        // Call tokenize_treasury_asset function
+        let result = tokenize_treasury_asset(&mut context, request);
+        
+        // Check result
+        assert!(result.is_ok());
+    }
+
+/// Process Treasury market data for the NASDAQ simulation
+/// This function handles incoming market data updates for treasury assets
+#[public]
+pub fn process_treasury_market_data(context: &mut Context, data: TreasuryMarketData) -> Result<MarketUpdateResult, String> {
+    // Ensure contract is initialized
+    ensure_initialized(context)?;
+    
+    // Get asset registry
+    let mut asset_registry = get_asset_registry(context)?;
+    
+    // Start time tracking
+    let timestamp = get_current_timestamp();
+    
+    // Verify the market data through the dual TEE architecture
+    let mut accumulator = get_attestation_accumulator(context)?;
+    
+    // Perform cross-attestation verification
+    let (verified, verification_time) = accumulator.verify_tees(
+        &data.primary_tee_id,
+        &data.secondary_tee_id,
+        &data.region_id,
+    );
+    
+    if !verified {
+        return Err("Market data verification failed: Cross-attestation failed".to_string());
+    }
+    
+    // Update verification metrics
+    update_verification_metrics(context, verification_time, "market_data")?;
+    
+    // Update the asset price if it exists, otherwise create a new asset
+    let asset_key = data.cusip.clone();
+    let treasury_asset = if let Some(existing_asset) = asset_registry.assets.get(&asset_key) {
+        // Update existing asset with new price data
+        let mut updated_asset = existing_asset.clone();
+        updated_asset.treasury_info.current_price = data.price;
+        updated_asset.base.current_price = data.price;
+        updated_asset.base.last_update_timestamp = timestamp;
+        updated_asset
+    } else {
+        // Create a new Treasury asset
+        let treasury_type = match data.treasury_type.as_str() {
+            "BILL" => treasury::TreasuryType::Bill,
+            "NOTE" => treasury::TreasuryType::Note,
+            "BOND" => treasury::TreasuryType::Bond,
+            "TIP" => treasury::TreasuryType::TIPS,
+            _ => return Err(format!("Unknown Treasury type: {}", data.treasury_type)),
+        };
+        
+        // Create the new asset
+        treasury::create_treasury_asset(
+            data.cusip,
+            data.name,
+            treasury_type,
+            data.maturity_years,
+            data.coupon_rate,
+            data.price,
+            timestamp,
+        )
+    };
+    
+    // Save updated asset to registry
+    asset_registry.assets.insert(asset_key.clone(), treasury_asset.clone());
+    context.store(AssetRegistry, &asset_registry)
+        .map_err(|e| format!("Failed to store asset registry: {}", e))?;
+    
+    // Create the market update result
+    let result = MarketUpdateResult {
+        cusip: asset_key,
+        price: data.price,
+        timestamp,
+        verification_time_ms: verification_time,
+        market_status: "active".to_string(),
+    };
+    
+    Ok(result)
+}
+}

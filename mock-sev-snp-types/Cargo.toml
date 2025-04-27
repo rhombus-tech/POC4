@@ -1,0 +1,7 @@
+[package]
+name = "sev_snp_types"
+version = "0.1.0"
+edition = "2021"
+description = "Mock implementation of sev_snp_types for testing purposes"
+
+[dependencies]

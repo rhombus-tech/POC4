@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"  
+members = [
+    "interface",
+    "wasm-module",
+    "controller",
+    "contract",
+    "client",
+    "controller/src/bin/wasm_module",
+    "controller/tests/contracts/simple_add",
+    "controller/tests/contracts/simple_multiply",
+    "controller/tests/contracts/token_transfer",
+    "controller/tests/contracts/key_value_store", 
+    "controller/tests/contracts/data_oracle",
+    "controller/tests/contracts/market_data_consumer",
+    "mock-sev-snp-types",
+    "wasmlanche"
+]
+exclude = []
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Tal <tal@rhombus-tech.com>"]
+description = "Dual TEE execution system using Enarx"
+
+[workspace.dependencies]
+# Serialization
+borsh = { version = "1.5", features = ["derive"] }
+borsh-derive = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async
+tokio = { version = "1.36.0", features = ["full"] }
+async-trait = "0.1.77"
+tokio-macros = "2.1"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+clap_derive = "4.4"
+
+# Error handling
+thiserror = "1.0"
+
+# Crypto
+sha2 = "0.10"
+
+# gRPC
+tonic = { version = "0.11", features = ["transport"] }
+prost = "0.12"
+tonic-build = { version = "0.11", features = ["transport"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

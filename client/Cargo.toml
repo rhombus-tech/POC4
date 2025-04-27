@@ -1,0 +1,83 @@
+[package]
+name = "aristo-client"
+version = "0.1.0"
+edition = "2021"
+description = "Type-safe client library for Aristo cross-regional TEE architecture"
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"  # Efficient binary serialization
+bytes = "1.4"    # For efficient byte handling
+byteorder = "1.4" # For byte order handling in ITCH protocol
+
+# Async runtime
+tokio = { version = "1", features = ["full", "net"] }
+
+# Error handling
+thiserror = "1.0"
+libc = "0.2"
+anyhow = "1.0"
+
+# Cryptography for attestation
+ed25519-dalek = "2.0"
+sha2 = "0.10"
+ring = "0.16"    # Additional cryptographic primitives
+
+# TEE-specific libraries
+sgx_types = { version = "1.1", optional = true }       # For Intel SGX support
+sev_snp_types = { path = "../mock-sev-snp-types", optional = true }   # Mock AMD SEV support for testing
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Protocol optimizations
+prost = "0.11"   # Protocol Buffers implementation for Rust
+tonic = "0.9"    # gRPC implementation for efficient communication
+
+# HTTP Client (optional)
+reqwest = { version = "0.11", features = ["json"], optional = true }
+
+# Random number generation
+rand = "0.8"   # For random functionality
+
+[features]
+default = ["http"]
+
+# TEE-specific features
+sgx = ["sgx_types"]
+sev = ["dep:sev_snp_types"]
+all-tee = ["sgx", "sev"]
+
+# Functionality features
+http = ["dep:reqwest"]
+wasm-runtime = []
+market-data = []
+
+# Development and testing profiles
+simulation = ["market-data"]
+production = ["all-tee", "market-data", "wasm-runtime"]
+test-itch = ["market-data"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.11"
+criterion = "0.4"  # For benchmarking
+
+[[example]]
+name = "realtime_itch_demo"
+required-features = ["market-data"]
+
+[[example]]
+name = "itch_multicast_demo"
+required-features = ["market-data"]
+
+[[example]]
+name = "order_book_test"
+required-features = ["market-data"]
+
+[[example]]
+name = "feed_sync_test"
+required-features = ["market-data"]

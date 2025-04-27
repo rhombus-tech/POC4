@@ -1,0 +1,22 @@
+[package]
+name = "orderbook_analyzer"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+# This package is compiled to Wasm for TEE execution
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# No std is required for Wasm compilation
+wee_alloc = "0.4.5"
+panic-abort = "0.3.2"
+
+[profile.release]
+# Optimize for size for Wasm
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

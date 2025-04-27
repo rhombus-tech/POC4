@@ -1,0 +1,9 @@
+[package]
+name = "hyper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tee-interface = { path = "../interface" }
+async-trait = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "wasmlanche-sim"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+simulator = []
+
+[dependencies]
+wasmtime = "15.0"
+anyhow = "1.0"
+hex = "0.4"
+uuid = { version = "1.6", features = ["v4"] }
+tokio = { version = "1.36", features = ["full"] }
+async-trait = "0.1"
+chrono = "0.4"
+tee-interface = { path = "../interface" }

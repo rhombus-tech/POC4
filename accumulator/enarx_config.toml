@@ -1,0 +1,34 @@
+# Enarx Configuration for RSA Accumulator with HTTP Server
+# This configuration enables the dual-format parameter validation in the TEE
+
+# WASI configuration
+[wasi]
+# Map directories for persistent storage if needed
+# Environment variables for configuration
+env = [
+  "PORT=7101",                     # HTTP server port 
+  "TEE_TYPE=sgx",                  # TEE type (sgx or sev)
+  "MAX_PARAMETER_SIZE=1024",       # Maximum parameter size in bytes
+  "ENABLE_LENGTH_PREFIX=true",     # Enable length-prefixed format
+  "ENABLE_DIRECT_FORMAT=true",     # Enable direct format
+  "LOG_LEVEL=info",                # Logging level
+  "ENABLE_CROSS_VAL=true"          # Enable cross-validation
+]
+
+# Allowed host calls for the TEE
+[tcb]
+# Allow networking for HTTP server
+allow_host_net = true 
+# Allow randomness for cryptographic operations
+allow_random = true
+# Access to time for timestamps
+allow_host_time = true
+# Allow logging
+allow_host_std = true
+
+# Resource limits
+[limits]
+# Memory limits
+max_memory = "256MB"
+# Thread limits
+max_threads = 4
