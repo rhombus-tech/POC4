@@ -1,0 +1,42 @@
+[package]
+name = "polynomial_commitments"
+version = "0.1.0"
+edition = "2021"
+authors = ["Aristo Team"]
+description = "Polynomial commitment scheme for ZK state archival system"
+
+# Tell cargo to build as a standalone crate when testing
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["standalone"]
+standalone = []
+# TEE integration feature (dependencies commented out until available)
+tee_integration = [] # ["controller", "interface"]
+test-util = []
+
+[dependencies]
+# Core dependencies
+ff = "0.13.0"                # Finite field operations
+ndarray = { version = "0.15.6", features = ["rayon"] }           # Matrix operations
+rand = "0.8.5"               # Randomness
+sha2 = "0.10.6"              # Hashing
+rayon = "1.7.0"              # Parallel processing
+
+# TEE integration dependencies (commented out until available in workspace)
+# controller = { path = "../controller", optional = true }
+# interface = { path = "../interface", optional = true }
+
+# Error handling and logging
+log = "0.4.17"
+thiserror = "1.0.40"
+
+# Required for ff::Field implementations
+subtle = "2.5.0"
+
+[dev-dependencies]
+criterion = "0.4.0"          # For benchmarking
+proptest = "1.2"           # Property-based testing
+pasta_curves = { version = "0.5" }
+rand_chacha = "0.3.1"

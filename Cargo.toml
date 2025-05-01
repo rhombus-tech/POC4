@@ -14,7 +14,8 @@ members = [
     "controller/tests/contracts/data_oracle",
     "controller/tests/contracts/market_data_consumer",
     "mock-sev-snp-types",
-    "wasmlanche"
+    "wasmlanche",
+    "polynomial_commitments"
 ]
 exclude = []
 
