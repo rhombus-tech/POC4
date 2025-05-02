@@ -31,6 +31,29 @@ pub struct EnarxController {
 }
 
 impl EnarxController {
+    // WASI detection helper
+    fn is_wasi_module(&self, function_call: &str) -> bool {
+        // Check for WASI prefix or module indicators
+        if function_call.starts_with("wasi_") || 
+           function_call.contains("::wasi::") || 
+           function_call.ends_with(".wasi") {
+            return true;
+        }
+        
+        // Check common WASI function patterns
+        const WASI_FUNCTIONS: [&str; 4] = [
+            "fd_write", "fd_read", "environ_get", "proc_exit"
+        ];
+        
+        for wasi_fn in WASI_FUNCTIONS.iter() {
+            if function_call.contains(wasi_fn) {
+                return true;
+            }
+        }
+        
+        false
+    }
+    
     /// Create a new Enarx controller
     pub async fn new(tee_type: TeeType, config_dir: &str, simulation: bool) -> Result<Self, TeeError> {
         info!("Creating EnarxController for TEE type: {:?}, config_dir: {:?}, simulate: {}", tee_type, config_dir, simulation);
@@ -194,16 +217,28 @@ impl TeeExecutor for EnarxController {
             }
         };
         
-        // Prepare the parameters using our new encoding method
+        // Check if this is a WASI module by looking at function call name
+        let is_wasi = self.is_wasi_module(&payload.params.function_call);
+        if is_wasi {
+            debug!("Detected WASI module based on function call: {}", payload.params.function_call);
+        }
+        
+        // Prepare the parameters using our new encoding method with dual-format support
         let params = ParamHandler::encode(payload).map_err(|e| {
             TeeError::ExecutionError(format!("Failed to encode parameters: {}", e))
         })?;
         
-        debug!("Executing contract with {} bytes of encoded parameters", params.len());
+        debug!("Executing {} contract with {} bytes of encoded parameters", 
+               if is_wasi { "WASI" } else { "WebAssembly" }, 
+               params.len());
         
-        // Execute the contract
+        // Execute the contract, using appropriate WASI handling
         let start_time = std::time::Instant::now();
-        let result = keep_manager.execute(&contract_path, &params).await?;
+        let result = if is_wasi {
+            keep_manager.execute_wasi(&contract_path, &params, self.tee_type.clone()).await?
+        } else {
+            keep_manager.execute(&contract_path, &params).await?
+        };
         let execution_time = start_time.elapsed().as_millis() as u64;
         
         // Create basic execution stats

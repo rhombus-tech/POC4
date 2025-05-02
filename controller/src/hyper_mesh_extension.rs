@@ -559,6 +559,7 @@ impl MeshExecutionExtension for HyperTeeController {
                     enclave_type: match mesh_attestation.enclave_type.as_str() {
                         "IntelSGX" => TeeType::SGX,
                         "SEV" => TeeType::SEV,
+                        "TDX" => TeeType::TDX, // Add TDX support for AI computations
                         _ => TeeType::SGX, // Default if unknown
                     },
                 }

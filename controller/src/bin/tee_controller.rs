@@ -7,6 +7,7 @@ use tee_controller::enarx::controller::EnarxController;
 use tee_controller::PolynomialController; // Import our polynomial controller
 use tee_controller::polynomial_integration::extend_tee_executor; // Import our extension function
 use tee_interface::TeeType as InterfaceTeeType;
+use tee_interface::TeeExecutor;
 use tee_controller::mesh::{MeshConfig, MeshCoordinator, TeeType as MeshTeeType};
 use tee_controller::paired_executor::TeeExecutorPair;
 use tee_controller::server::TeeServer;
@@ -43,7 +44,7 @@ struct Args {
     #[clap(long)]
     tee_id: Option<String>,
 
-    /// Preferred TEE type for execution (sgx or sev)
+    /// Preferred TEE type for execution (sgx, sev, or tdx)
     #[clap(long, default_value = "sgx")]
     tee_type: String,
 
@@ -75,7 +76,7 @@ struct Args {
     #[clap(long)]
     input: Option<PathBuf>,
 
-    /// Backend for direct execution (sgx, sev)
+    /// Backend for direct execution (sgx, sev, tdx)
     #[clap(long, default_value = "sgx")]
     backend: String,
 
@@ -257,7 +258,7 @@ async fn main() -> Result<(), std::io::Error> {
     std::env::set_var("TEE_EXECUTION_MODE", &args.execution_mode);
     info!("Setting execution mode to: {}", args.execution_mode);
     
-    // Create the SGX and SEV TEE executors
+    // Create the SGX, SEV, and TDX TEE executors
     let sgx_controller = match EnarxController::new(
         InterfaceTeeType::SGX, 
         args.base_dir.join("sgx").to_str().unwrap_or("./sgx"), 
@@ -318,9 +319,49 @@ async fn main() -> Result<(), std::io::Error> {
     // Extend SEV controller with polynomial commitment capabilities
     let extended_sev_controller = extend_tee_executor(sev_controller, poly_sev_controller);
     
-    // Wrap the controllers in Arc<RwLock>
-    let sgx = Arc::new(RwLock::new(extended_sgx_controller));
-    let sev = Arc::new(RwLock::new(extended_sev_controller));
+    // Create TDX controller
+    let tdx_controller = match EnarxController::new(
+        InterfaceTeeType::TDX, 
+        args.base_dir.join("tdx").to_str().unwrap_or("./tdx"), 
+        args.simulate
+    ).await {
+        Ok(controller) => controller,
+        Err(e) => {
+            error!("Failed to initialize TDX controller: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("TDX initialization error: {:?}", e)
+            ));
+        }
+    };
+    
+    // Create the polynomial commitment controller for TDX
+    let poly_tdx_controller = match PolynomialController::new(InterfaceTeeType::TDX).await {
+        Ok(controller) => controller,
+        Err(e) => {
+            error!("Failed to initialize polynomial TDX controller: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("Polynomial TDX initialization error: {:?}", e)
+            ));
+        }
+    };
+    
+    // Extend TDX controller with polynomial commitment capabilities
+    let extended_tdx_controller = extend_tee_executor(tdx_controller, poly_tdx_controller);
+    
+    // Create Arc<RwLock<>> wrappers for our controllers
+    let primary_executor = Arc::new(RwLock::new(extended_sgx_controller));
+    let secondary_executor = Arc::new(RwLock::new(extended_tdx_controller)); // Use TDX for high-throughput AI workloads
+    
+    // Construct pairs of TEE executors (using clones to avoid ownership issues)
+    let mut tee_pairs: std::collections::HashMap<MeshTeeType, Arc<RwLock<dyn TeeExecutor + Send + Sync>>> = std::collections::HashMap::new();
+    let sev_executor = Arc::new(RwLock::new(extended_sev_controller));
+    
+    // Use clones of the Arc pointers for the HashMap to avoid ownership issues
+    tee_pairs.insert(MeshTeeType::IntelSGX, primary_executor.clone());
+    tee_pairs.insert(MeshTeeType::SEV, sev_executor);
+    tee_pairs.insert(MeshTeeType::TDX, secondary_executor.clone());
     
     // Generate a TEE ID if not provided
     let tee_id = match args.tee_id {
@@ -370,7 +411,7 @@ async fn main() -> Result<(), std::io::Error> {
     };
     
     // Create the paired executor
-    let paired_executor = TeeExecutorPair::new(sgx, sev, mesh_coordinator);
+    let paired_executor = TeeExecutorPair::new(primary_executor, secondary_executor, mesh_coordinator);
     let executor = Arc::new(paired_executor);
     
     // Process subcommands if present
@@ -515,6 +556,7 @@ async fn handle_mesh_execute(
     let tee_type = match tee_type.to_lowercase().as_str() {
         "sgx" => MeshTeeType::IntelSGX,
         "sev" => MeshTeeType::SEV,
+        "tdx" => MeshTeeType::TDX,
         _ => {
             error!("Unsupported TEE type: {}", tee_type);
             return Err(std::io::Error::new(
@@ -564,6 +606,7 @@ async fn handle_discover_peers(
             match typ.to_lowercase().as_str() {
                 "sgx" => Some(MeshTeeType::IntelSGX),
                 "sev" => Some(MeshTeeType::SEV),
+                "tdx" => Some(MeshTeeType::TDX),
                 _ => {
                     error!("Unsupported TEE type: {}", typ);
                     return Err(std::io::Error::new(
@@ -649,6 +692,7 @@ async fn handle_execute_with_mesh_cache(
     let tee_type = match tee_type.to_lowercase().as_str() {
         "sgx" => MeshTeeType::IntelSGX,
         "sev" => MeshTeeType::SEV,
+        "tdx" => MeshTeeType::TDX,
         _ => {
             error!("Unsupported TEE type: {}", tee_type);
             return Err(std::io::Error::new(

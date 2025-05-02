@@ -1,14 +1,16 @@
-use std::path::Path;
+// Path is already imported in the std::path::{Path, PathBuf} line below
 use std::process::Command;
 use std::process::Child;
-use std::io::Write;
+// use std::io::Write; // Not needed after refactoring
 use log::{debug, info, error, warn};
 use crate::enarx::error::EnarxError;
 use tee_interface::TeeError;
+use tee_interface::TeeType;
 use std::env;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use which::which;
@@ -41,6 +43,8 @@ pub struct Keep {
     pub process: Option<Child>,
     /// TEE type of this keep
     pub tee_type: String,
+    /// Flag indicating if this keep is currently in use
+    pub in_use: bool,
 }
 
 impl Keep {
@@ -53,6 +57,7 @@ impl Keep {
             last_used: None,
             process: None,
             tee_type,
+            in_use: false, // Initialize as not in use
         }
     }
 
@@ -64,7 +69,14 @@ impl Keep {
     /// Mark this keep as in use
     pub fn mark_in_use(&mut self) {
         self.status = KeepStatus::InUse;
+        self.in_use = true; // Set the in_use flag
         self.last_used = Some(Instant::now());
+    }
+    
+    /// Mark this keep as no longer in use
+    pub fn mark_not_in_use(&mut self) {
+        self.in_use = false;
+        self.status = KeepStatus::Ready;
     }
 
     /// Mark this keep as ready for use
@@ -424,88 +436,130 @@ impl KeepManager {
     }
     
     /// Execute a WebAssembly contract in an Enarx keep
-    pub async fn execute(&self, contract_path: &Path, params: &[u8]) -> Result<Vec<u8>, TeeError> {
-        info!("Executing contract {} with {} bytes of parameters", contract_path.display(), params.len());
+    pub async fn execute<P: AsRef<Path>>(&self, contract_path: P, params: &[u8]) -> Result<Vec<u8>, TeeError> {
+        // Validate params to prevent exploits
+        if params.len() == 0 {
+            return Err(TeeError::ValidationError("Empty parameters provided".to_string()));
+        }
         
-        // Try to get a keep from the pool
-        let keep_id = match self.get_keep().await {
-            Ok(id) => id,
-            Err(e) => {
-                error!("Failed to get keep from pool: {}", e);
-                // Fall back to direct execution
-                return self.execute_with_enarx(contract_path, params).await;
+        const MAX_REASONABLE_PARAMS_SIZE: usize = 10 * 1024 * 1024; // 10MB
+        if params.len() > MAX_REASONABLE_PARAMS_SIZE {
+            return Err(TeeError::ValidationError(format!("Parameter size too large: {} bytes", params.len())));
+        }
+        
+        // Support both direct and length-prefixed formats
+        let validated_params = if params.len() >= 4 {
+            let length_bytes = [params[0], params[1], params[2], params[3]];
+            let length = u32::from_le_bytes(length_bytes) as usize;
+            
+            if length > 0 && length <= MAX_REASONABLE_PARAMS_SIZE && params.len() >= length + 4 {
+                // Length-prefixed format
+                &params[4..length+4]
+            } else {
+                // Direct format
+                params
             }
+        } else {
+            // Direct format
+            params
+        };
+        
+        info!("Executing contract {} with {} bytes of parameters", contract_path.as_ref().display(), params.len());
+        
+        // Get a keep from the pool
+        let keep_id = self.get_keep().await?;
+        
+        let keeps = self.keeps.read().await;
+        let keep = keeps.get(&keep_id).ok_or_else(|| TeeError::ExecutionError("Keep not found".to_string()))?;
+        
+        // Determine appropriate backend based on keep's TEE type
+        let backend = match keep.tee_type.as_str() {
+            "SGX" => "sgx",
+            "SEV" => "sev",
+            "TDX" => "tdx",
+            _ => "sgx" // Default to SGX for backward compatibility
         };
         
         // Execute the contract
-        let result = self.execute_with_keep(&keep_id, contract_path, params).await;
+        let result = self.execute_with_keep(&keep_id, contract_path, validated_params).await;
         
         // Return the keep to the pool
         if let Err(e) = self.return_keep(&keep_id).await {
             error!("Failed to return keep to pool: {}", e);
         }
         
+        // Return the result
         result
     }
-    
-    /// Execute a WebAssembly contract using a specific keep
-    async fn execute_with_keep(&self, keep_id: &str, contract_path: &Path, params: &[u8]) -> Result<Vec<u8>, TeeError> {
-        debug!("Executing contract with keep {}", keep_id);
-        
-        // In a real implementation, we would send the contract and params to the keep
-        // and wait for the result
-        
-        // For now, we'll execute Enarx directly
-        self.execute_with_enarx(contract_path, params).await
-    }
 
-    /// Execute a WebAssembly contract with specific method and parameters
-    pub async fn execute_contract<P: AsRef<Path>>(&self, contract_path: P, method: &str, params: &[u8]) -> Result<Vec<u8>, TeeError> {
-        // Combine method and params into a single payload
-        let mut payload = Vec::new();
-        payload.extend_from_slice(method.as_bytes());
-        payload.push(0);  // Null terminator for method name
-        payload.extend_from_slice(params);
-        
-        self.execute(contract_path.as_ref(), &payload).await
-    }
-    
-    /// Execute a WebAssembly contract using the actual Enarx binary
-    ///
-    /// This is not used in the simulation, but shows how it would be implemented
-    /// with the real Enarx binary
-    #[allow(dead_code)]
-    async fn execute_with_enarx<P: AsRef<Path>>(&self, contract_path: P, params: &[u8]) -> Result<Vec<u8>, TeeError> {
+    /// Execute a WebAssembly contract in a specific keep with robust parameter handling
+    /// 
+    /// This method implements the security-first architecture with dual-format parameter handling
+    /// supporting both length-prefixed and direct data formats
+    async fn execute_with_keep<P: AsRef<Path>>(&self, keep_id: &str, contract_path: P, params: &[u8]) -> Result<Vec<u8>, TeeError> {
         let contract_path = contract_path.as_ref();
-        debug!("Executing contract {} with Enarx binary", contract_path.display());
+        debug!("Executing contract {} in keep {}", contract_path.display(), keep_id);
         
-        // Prepare the command with stdin/stdout pipes
-        let mut cmd = Command::new(&self.enarx_path);
-        cmd.arg("run")
+        // Validate the keep ID
+        let keeps = self.keeps.read().await;
+        let keep = keeps.get(keep_id).ok_or_else(|| TeeError::ExecutionError(format!("Keep {} not found", keep_id)))?;
+        
+        // Ensure the keep is in use (should be marked as such by get_keep)
+        if !keep.in_use {
+            return Err(TeeError::ExecutionError(format!("Keep {} is not marked as in use", keep_id)));
+        }
+        
+        // Validate parameters again to ensure security
+        let validated_params = if params.len() >= 4 {
+            let length_bytes = [params[0], params[1], params[2], params[3]];
+            let length = u32::from_le_bytes(length_bytes) as usize;
+            
+            const MAX_REASONABLE_PARAMS_SIZE: usize = 10 * 1024 * 1024; // 10MB
+            if length > 0 && length <= MAX_REASONABLE_PARAMS_SIZE && params.len() >= length + 4 {
+                // Length-prefixed format
+                debug!("Using length-prefixed format with length {}", length);
+                &params[4..length+4]
+            } else {
+                // Direct format (fallback)
+                debug!("Using direct format, length prefix appears invalid");
+                params
+            }
+        } else {
+            // Direct format (too short for length prefix)
+            debug!("Using direct format, too short for length prefix");
+            params
+        };
+        
+        // Create a WASI config file with the parameters
+        let config_path = self.create_wasi_config(validated_params)?;
+        
+        // Determine the appropriate backend based on the keep's TEE type
+        let backend = match keep.tee_type.as_str() {
+            "SGX" => "sgx",
+            "SEV" => "sev",
+            "TDX" => "tdx",
+            _ => "sgx" // Default to SGX for backward compatibility
+        };
+        
+        // Build the command to execute
+        let result = Command::new(&self.config.enarx_path)
+            .arg("run")
+            .arg("--backend")
+            .arg(backend)
+            .arg("--wasmcfgfile")
+            .arg(&config_path)
             .arg(contract_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to spawn Enarx: {}", e)))?;
         
-        // Spawn the process
-        let mut child = cmd.spawn()
-            .map_err(|e| TeeError::ExecutionError(format!("Failed to execute Enarx: {}", e)))?;
-        
-        // Write parameters to stdin if any
-        if !params.is_empty() {
-            debug!("Writing {} bytes of parameters to Enarx stdin", params.len());
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin.write_all(params)
-                    .map_err(|e| TeeError::ExecutionError(format!("Failed to write to stdin: {}", e)))?;
-            } else {
-                return Err(TeeError::ExecutionError("Failed to open stdin".to_string()));
-            }
-        }
-        
-        // Wait for the process to complete and capture output
-        let output = child.wait_with_output()
+        // Wait for the command to complete and collect output
+        let output = result.wait_with_output()
             .map_err(|e| TeeError::ExecutionError(format!("Failed to wait for Enarx: {}", e)))?;
         
+        // Check for successful execution
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("Enarx execution failed: {}", stderr);
@@ -515,4 +569,205 @@ impl KeepManager {
         debug!("Enarx execution completed successfully, received {} bytes of output", output.stdout.len());
         Ok(output.stdout)
     }
+    
+    /// Determine if a WASM module is a WASI module
+    pub fn is_wasi_module(&self, function_call: &str, params: &[u8]) -> bool {
+        // Check for WASI module indicators in function call
+        if function_call.starts_with("wasi_") || function_call.contains("::wasi::") {
+            return true;
+        }
+        
+        // Check file extension indicators in params if they represent a path
+        if let Ok(param_str) = std::str::from_utf8(params) {
+            if param_str.ends_with(".wasi") || param_str.contains(".wasi.") {
+                return true;
+            }
+        }
+        
+        // Detect WASI by checking for common WASI imports in binary (simplified version)
+        if params.len() > 16 {  // Minimum size for WebAssembly module
+            // Simple check for WASI module - look for WASI imports section pattern
+            // This is a simplified check; a real implementation would parse the WebAssembly binary
+            let mut i = 0;
+            while i < params.len() - 10 {
+                // Look for common WASI imports like "wasi_snapshot_preview1"
+                if params[i..].starts_with(b"wasi_") {
+                    return true;
+                }
+                i += 1;
+            }
+        }
+        
+        false
+    }
+    
+    /// Execute a WASI module in an Enarx keep with TDX support
+    /// 
+    /// This method specifically handles WASI modules with appropriate WASI runtime flags
+    pub async fn execute_wasi<P: AsRef<Path>>(&self, contract_path: P, params: &[u8], tee_type: TeeType) -> Result<Vec<u8>, TeeError> {
+        debug!("Executing WASI module {} with {} bytes of parameters", contract_path.as_ref().display(), params.len());
+        
+        // Do parameter validation to prevent exploits
+        if params.len() > 10 * 1024 * 1024 { // 10MB max
+            return Err(TeeError::ValidationError(format!("Parameter size too large: {} bytes", params.len())));
+        }
+        
+        // Support both direct and length-prefixed parameter formats
+        let validated_params = self.validate_parameters(params)?;
+        
+        // Get keep with appropriate backend type
+        let keep_id = self.get_keep().await?;
+        
+        // Execute with WASI flags
+        let result = self.execute_wasi_in_keep(&keep_id, contract_path, validated_params, tee_type).await;
+        
+        // Return the keep to the pool
+        if let Err(e) = self.return_keep(&keep_id).await {
+            warn!("Failed to return keep to pool: {}", e);
+        }
+        
+        result
+    }
+    
+    /// Execute a WASI module in a specific keep with TDX support
+    async fn execute_wasi_in_keep<P: AsRef<Path>>(&self, keep_id: &str, contract_path: P, params: &[u8], tee_type: TeeType) -> Result<Vec<u8>, TeeError> {
+        debug!("Executing WASI module in keep {}", keep_id);
+        
+        // Get the keep
+        let mut keep_lock = self.keeps.write().await;
+        let keep = match keep_lock.get_mut(keep_id) {
+            Some(k) => k,
+            None => return Err(TeeError::ExecutionError(format!("Keep not found: {}", keep_id))),
+        };
+        
+        if keep.status != KeepStatus::Ready {
+            return Err(TeeError::ExecutionError(format!("Keep not ready: {}", keep_id)));
+        }
+        
+        // Mark the keep as in use
+        keep.mark_in_use();
+        
+        // Store a temporary copy of the config for WASI execution
+        let config_path = self.create_wasi_config(params)?;
+        
+        // Determine the appropriate backend based on TEE type
+        let backend = match tee_type {
+            TeeType::SGX => "sgx",
+            TeeType::SEV => "sev",
+            TeeType::TDX => "tdx",
+        };
+        
+        // Execute with Enarx using the WASI runtime
+        let output = Command::new(&self.config.enarx_path)
+            .arg("run")
+            .arg("--backend")
+            .arg(backend)
+            .arg("--wasmcfgfile")
+            .arg(&config_path)
+            .arg("--wasi")  // Enable WASI runtime
+            .arg(contract_path.as_ref())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to execute Enarx: {}", e)))?;
+        
+        // Clean up temporary config
+        if let Err(e) = std::fs::remove_file(&config_path) {
+            warn!("Failed to remove temporary config file: {}", e);
+        }
+        
+        // Handle the result
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("Enarx WASI execution failed: {}", stderr);
+            return Err(TeeError::ExecutionError(format!("Enarx WASI execution failed: {}", stderr)));
+        }
+        
+        debug!("WASI execution completed successfully, received {} bytes of output", output.stdout.len());
+        Ok(output.stdout)
+    }
+    
+    /// Create a temporary WASI configuration file
+    fn create_wasi_config(&self, params: &[u8]) -> Result<PathBuf, TeeError> {
+        let config_dir = std::env::temp_dir().join("enarx-wasi-configs");
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to create temp config directory: {}", e)))?;
+        
+        let config_path = config_dir.join(format!("wasi-config-{}.json", uuid::Uuid::new_v4()));
+        
+        // Create a basic WASI config that includes parameters
+        let config = serde_json::json!({
+            "wasi": {
+                "env": {
+                    "PARAMETER_SIZE": params.len().to_string(),
+                },
+                "preopened_dirs": ["/tmp"],
+                "mapped_dirs": {}
+            }
+        });
+        
+        std::fs::write(&config_path, config.to_string())
+            .map_err(|e| TeeError::ExecutionError(format!("Failed to write config file: {}", e)))?;
+        
+        Ok(config_path)
+    }
+    
+    /// Validate parameters to prevent exploits
+    fn validate_parameters<'a>(&self, params: &'a [u8]) -> Result<&'a [u8], TeeError> {
+        if params.is_empty() {
+            return Err(TeeError::ValidationError("Empty parameters".to_string()));
+        }
+        
+        const MAX_REASONABLE_PARAMS_SIZE: usize = 10 * 1024 * 1024; // 10MB
+        if params.len() > MAX_REASONABLE_PARAMS_SIZE {
+            return Err(TeeError::ValidationError(format!("Parameter size too large: {} bytes", params.len())));
+        }
+        
+        // Support both direct and length-prefixed formats (with dual-format support)
+        let validated_params = if params.len() >= 4 {
+            let length_bytes = [params[0], params[1], params[2], params[3]];
+            let length = u32::from_le_bytes(length_bytes) as usize;
+            
+            if length > 0 && length <= MAX_REASONABLE_PARAMS_SIZE && params.len() >= length + 4 {
+                // Length-prefixed format
+                &params[4..length+4]
+            } else {
+                // Direct format (fallback)
+                params
+            }
+        } else {
+            // Direct format (too short for length prefix)
+            params
+        };
+        
+        Ok(validated_params)
+    }
+
+    /// Execute a WebAssembly contract using the actual Enarx binary
+    ///
+    /// This is not used in the simulation, but shows how it would be implemented
+    /// with the real Enarx binary
+    pub async fn execute_with_enarx<P: AsRef<Path>>(&self, contract_path: P, params: &[u8]) -> Result<Vec<u8>, TeeError> {
+        let contract_path = contract_path.as_ref();
+        debug!("Executing contract {} with Enarx binary", contract_path.display());
+        
+        // Get a keep from the pool
+        let keep_id = self.get_keep().await?;
+        
+        // Validate parameters with dual-format support
+        let validated_params = self.validate_parameters(params)?;
+        
+        // Execute the contract using the keep
+        let result = self.execute_with_keep(&keep_id, contract_path, validated_params).await;
+        
+        // Return the keep to the pool regardless of execution result
+        if let Err(e) = self.return_keep(&keep_id).await {
+            error!("Failed to return keep to pool: {}", e);
+            // Don't fail the execution if we just couldn't return the keep
+        }
+        
+        // Return the execution result
+        result
+    }
+    
 }

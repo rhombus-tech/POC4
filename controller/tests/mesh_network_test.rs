@@ -227,8 +227,9 @@ impl TestTeeNode {
     
     fn get_compatible_tee_type_string(&self) -> String {
         match self.tee_type {
-            TeeType::IntelSGX => "INTEL_SGX".to_string(),
+            TeeType::IntelSGX => "SGX".to_string(),
             TeeType::SEV => "SEV".to_string(),
+            TeeType::TDX => "TDX".to_string(),
         }
     }
 }
@@ -245,6 +246,7 @@ struct MeshTestHarness {
 struct TeePair {
     sgx_node_id: String,
     sev_node_id: String,
+    tdx_node_id: String,  // Added TDX node ID for AI workloads
     region_id: String,
 }
 
@@ -367,10 +369,11 @@ impl MeshTestHarness {
         Ok(())
     }
     
-    // New method to create a TEE pair (SGX + SEV)
+    // New method to create a TEE triple (SGX + SEV + TDX)
     async fn create_tee_pair(&mut self, pair_id: &str, region_id: &str, base_port: u16) -> Result<(), std::io::Error> {
         let sgx_id = format!("{}-sgx", pair_id);
         let sev_id = format!("{}-sev", pair_id);
+        let tdx_id = format!("{}-tdx", pair_id);  // Added TDX node ID for AI workloads
         
         // Create SGX node
         self.add_node(&sgx_id, region_id, TeeType::IntelSGX, base_port).await?;
@@ -378,14 +381,18 @@ impl MeshTestHarness {
         // Create SEV node
         self.add_node(&sev_id, region_id, TeeType::SEV, base_port + 1).await?;
         
+        // Create TDX node for high-throughput AI workloads
+        self.add_node(&tdx_id, region_id, TeeType::TDX, base_port + 2).await?;
+        
         // Register the pair
         self.tee_pairs.insert(pair_id.to_string(), TeePair {
             sgx_node_id: sgx_id.clone(), // Clone here to avoid move
             sev_node_id: sev_id.clone(), // Clone here to avoid move
+            tdx_node_id: tdx_id.clone(), // Clone here to avoid move
             region_id: region_id.to_string(),
         });
         
-        println!("Created TEE pair {} with SGX node {} and SEV node {}", pair_id, sgx_id, sev_id);
+        println!("Created TEE triple {} with SGX node {}, SEV node {}, and TDX node {}", pair_id, sgx_id, sev_id, tdx_id);
         
         Ok(())
     }
@@ -400,11 +407,13 @@ impl MeshTestHarness {
         let source_id = match source_type {
             TeeType::IntelSGX => &pair.sgx_node_id,
             TeeType::SEV => &pair.sev_node_id,
+            TeeType::TDX => &pair.tdx_node_id,
         };
         
         let target_id = match target_type {
             TeeType::IntelSGX => &pair.sgx_node_id,
             TeeType::SEV => &pair.sev_node_id,
+            TeeType::TDX => &pair.tdx_node_id,
         };
         
         let source_node = self.nodes.get(source_id)
@@ -589,11 +598,13 @@ impl MeshTestHarness {
         let target_id = match failed_type {
             TeeType::IntelSGX => &pair.sev_node_id,  // If SGX failed, use SEV
             TeeType::SEV => &pair.sgx_node_id,  // If SEV failed, use SGX
+            TeeType::TDX => &pair.sgx_node_id,  // If TDX failed, use SGX for its secure properties
         };
         
         let failed_id = match failed_type {
             TeeType::IntelSGX => &pair.sgx_node_id,
             TeeType::SEV => &pair.sev_node_id,
+            TeeType::TDX => &pair.tdx_node_id,
         };
         
         // Test key and value

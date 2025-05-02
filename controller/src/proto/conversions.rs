@@ -66,6 +66,7 @@ pub fn to_proto_attestation(interface: &InterfaceAttestation) -> ProtoAttestatio
         enclave_type: match interface.enclave_type {
             TeeType::SGX => "SGX".to_string(),
             TeeType::SEV => "SEV".to_string(),
+            TeeType::TDX => "TDX".to_string(),
         },
     }
 }
@@ -122,6 +123,7 @@ impl From<TeeAttestation> for teeservice::TeeAttestation {
             enclave_type: match att.enclave_type {
                 TeeType::SGX => "SGX",
                 TeeType::SEV => "SEV",
+                TeeType::TDX => "TDX",
             }.to_string(),
         }
     }

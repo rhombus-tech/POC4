@@ -2011,6 +2011,7 @@ impl HyperTeeController {
                     match tee_type {
                         TeeType::SGX => "SGX".to_string(),
                         TeeType::SEV => "SEV".to_string(),
+                        TeeType::TDX => "TDX".to_string(),
                     },
                     input.to_vec(),
                     timeout,
@@ -2101,6 +2102,7 @@ impl HyperTeeController {
             match tee_type {
                 TeeType::SGX => "SGX",
                 TeeType::SEV => "SEV",
+                TeeType::TDX => "TDX",
             },
             target_tee,
             result.execution_time_ns as f64 / 1_000_000.0, // Convert ns to ms
@@ -2157,6 +2159,7 @@ impl HyperTeeController {
             tee_type.map(|t| match t {
                 TeeType::SGX => "SGX".to_string(),
                 TeeType::SEV => "SEV".to_string(),
+                TeeType::TDX => "TDX".to_string(),
             }),
             max_results,
         ).await {

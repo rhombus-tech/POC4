@@ -408,6 +408,7 @@ impl TeeExecutor for TeeExecutorPair {
                                 enclave_type: match a.enclave_type.to_lowercase().as_str() {
                                     "sgx" | "intelsgx" => tee_interface::TeeType::SGX,
                                     "sev" => tee_interface::TeeType::SEV,
+                                    "tdx" | "inteltdx" => tee_interface::TeeType::TDX, // Add TDX support for AI computations
                                     _ => tee_interface::TeeType::SGX,
                                 },
                                 measurement: a.measurement.clone(),
@@ -743,6 +744,7 @@ impl MeshExecutionExtension for TeeExecutorPair {
                     enclave_type: match a.enclave_type.to_lowercase().as_str() {
                         "sgx" | "intelsgx" => tee_interface::TeeType::SGX,
                         "sev" => tee_interface::TeeType::SEV,
+                        "tdx" | "inteltdx" => tee_interface::TeeType::TDX, // Support for AI compute in TDX environment
                         _ => tee_interface::TeeType::SGX, // Default to SGX if unknown
                     },
                     measurement: a.measurement.clone(),

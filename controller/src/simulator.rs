@@ -299,7 +299,14 @@ impl TeeExecutor for SimulatorController {
                 data: vec![0; 32],
                 signature: vec![0; 64],
                 region_proof: Some(vec![]),
-                enclave_type: TeeType::SGX,
+                // Choose TDX for AI workloads or SGX for other workloads
+                enclave_type: if payload.input.len() > 1024 || 
+                                (payload.operation_context.is_some() && 
+                                 payload.operation_context.as_ref().unwrap().len() > 1024) { 
+                    TeeType::TDX // Use TDX for larger workloads (likely AI compute)
+                } else {
+                    TeeType::SGX // Use SGX for standard workloads
+                },
             }],
             timestamp: chrono::Utc::now().to_rfc3339(),
             operation_status: None,
@@ -350,7 +357,8 @@ impl TeeExecutor for SimulatorController {
             data: vec![0; 32],
             signature: vec![0; 64],
             region_proof: Some(vec![]),
-            enclave_type: TeeType::SGX,
+            // Choose TDX for batch operations (like in AI trading scenarios) or SGX for standard ops
+            enclave_type: TeeType::TDX, // Support high-throughput AI trading scenarios
         }])
     }
 }

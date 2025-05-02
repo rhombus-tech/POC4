@@ -14,6 +14,10 @@ fn create_test_payload(_amount: u64, _contract_type: Option<String>) -> Executio
         previous_operation_id: None,
         operation_context: None,
         input: b"store,key1,value1".to_vec(),
+        region_id: Some("test-region".to_string()),
+        target_tee: Some("test-tee".to_string()),
+        tee_type: Some("TDX".to_string()),
+        allow_fallback: Some(true),
         params: ExecutionParams {
             expected_hash: vec![],
             detailed_proof: false,

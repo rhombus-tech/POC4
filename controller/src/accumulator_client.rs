@@ -20,6 +20,7 @@ pub struct AttestationReport {
 pub enum EnclaveType {
     IntelSGX,
     AMDSEV,
+    IntelTDX,
 }
 
 // Define LocalityInfoDto here
@@ -183,6 +184,7 @@ struct AccumulatorWitness {
 enum EnclaveTypeDto {
     IntelSGX,
     AMDSEV,
+    IntelTDX,
 }
 
 impl From<EnclaveType> for EnclaveTypeDto {
@@ -190,6 +192,7 @@ impl From<EnclaveType> for EnclaveTypeDto {
         match e {
             EnclaveType::IntelSGX => EnclaveTypeDto::IntelSGX,
             EnclaveType::AMDSEV => EnclaveTypeDto::AMDSEV,
+            EnclaveType::IntelTDX => EnclaveTypeDto::IntelTDX,
         }
     }
 }

@@ -15,12 +15,14 @@ use crate::accumulator_client::{AccumulatorClientTrait, RealAccumulatorClient, M
 use crate::accumulator_client::{create_accumulator_client};
 
 // Define TeeType enum for mesh
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TeeType {
     /// Intel SGX
     IntelSGX,
     /// AMD SEV
     SEV,
+    /// Intel TDX
+    TDX,
 }
 
 impl ToString for TeeType {
@@ -28,6 +30,7 @@ impl ToString for TeeType {
         match self {
             TeeType::IntelSGX => "IntelSGX".to_string(),
             TeeType::SEV => "SEV".to_string(),
+            TeeType::TDX => "TDX".to_string(),
         }
     }
 }
@@ -44,6 +47,9 @@ impl std::str::FromStr for TeeType {
             "sgx" => Ok(TeeType::IntelSGX), // Allow SGX as an alias
             "intel_sgx" => Ok(TeeType::IntelSGX), // Allow INTEL_SGX format
             "sev" => Ok(TeeType::SEV),
+            "tdx" => Ok(TeeType::TDX),
+            "intel_tdx" => Ok(TeeType::TDX), // Allow INTEL_TDX format
+            "inteltdx" => Ok(TeeType::TDX),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Unknown TEE type: {}", s)

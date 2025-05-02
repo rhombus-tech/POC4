@@ -142,15 +142,35 @@ async fn test_mesh_accumulator_tee_verification() {
     // Sleep to allow discovery to run in the background
     sleep(Duration::from_millis(300)).await;
     
-    // Attempt to discover peers with specific TEE type
-    let peers = mesh_coordinator.discover_peers(
+    // Attempt to discover peers with specific TEE type (SGX)
+    let sgx_peers = mesh_coordinator.discover_peers(
         "us-west".to_string(), 
         Some(TeeType::IntelSGX.to_string()), 
         5
-    ).await.expect("Failed to discover peers");
+    ).await.expect("Failed to discover SGX peers");
     
-    // Verify the peer list - should get at least the test peers from mock implementation
-    assert!(!peers.is_empty());
+    // Verify the SGX peer list - should get at least the test peers from mock implementation
+    assert!(!sgx_peers.is_empty());
+    
+    // Attempt to discover peers with TDX TEE type
+    let tdx_peers = mesh_coordinator.discover_peers(
+        "us-west".to_string(), 
+        Some(TeeType::TDX.to_string()), 
+        5
+    ).await.expect("Failed to discover TDX peers");
+    
+    // Verify the TDX peer list
+    assert!(!tdx_peers.is_empty());
+    
+    // Test discovery without specifying TEE type (should return all types)
+    let all_peers = mesh_coordinator.discover_peers(
+        "us-west".to_string(), 
+        None, 
+        10
+    ).await.expect("Failed to discover all peers");
+    
+    // We should have more peers when not filtering by type
+    assert!(all_peers.len() >= sgx_peers.len());
 }
 
 // Test super peer management through accumulator
@@ -182,19 +202,33 @@ async fn test_accumulator_with_mesh_execution() {
     // Create test input data
     let input_data = b"test-data".to_vec();
     
-    // Execute on the mesh
-    let execution_result = mesh_coordinator.execute(
+    // Test SGX execution on the mesh
+    let sgx_execution_result = mesh_coordinator.execute(
         "test-target".to_string(),
         "us-west".to_string(),
         TeeType::IntelSGX.to_string(),
-        input_data,
+        input_data.clone(),
         Duration::from_secs(1),
         false,
         true
     ).await;
     
     // In test mode this might fail, but we're just ensuring the interface works
-    println!("Execution result: {:?}", execution_result);
+    println!("SGX Execution result: {:?}", sgx_execution_result);
+    
+    // Test TDX execution on the mesh (ensuring our TDX support works correctly)
+    let tdx_execution_result = mesh_coordinator.execute(
+        "test-target".to_string(),
+        "us-west".to_string(),
+        TeeType::TDX.to_string(),
+        input_data.clone(),
+        Duration::from_secs(1),
+        false,
+        true
+    ).await;
+    
+    // In test mode this might fail, but we're just ensuring the interface works
+    println!("TDX Execution result: {:?}", tdx_execution_result);
 }
 
 // Test using discovery service with mesh coordinator

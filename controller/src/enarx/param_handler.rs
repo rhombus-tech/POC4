@@ -155,6 +155,10 @@ mod tests {
             params,
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some("test-region".to_string()),
+            target_tee: Some("test-tee".to_string()),
+            tee_type: Some("TDX".to_string()),
+            allow_fallback: Some(true),
         };
         
         // Encode the payload
@@ -181,6 +185,10 @@ mod tests {
             params,
             previous_operation_id: None,
             operation_context: None,
+            region_id: Some("test-region".to_string()),
+            target_tee: Some("test-tee".to_string()),
+            tee_type: Some("TDX".to_string()),
+            allow_fallback: Some(true),
         };
         
         // Encode the payload

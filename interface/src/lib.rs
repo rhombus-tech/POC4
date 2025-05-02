@@ -134,6 +134,7 @@ pub mod types {
     pub enum TeeType {
         SGX,
         SEV,
+        TDX,
     }
 
     impl fmt::Display for TeeType {
@@ -141,6 +142,7 @@ pub mod types {
             match self {
                 TeeType::SGX => write!(f, "SGX"),
                 TeeType::SEV => write!(f, "SEV"),
+                TeeType::TDX => write!(f, "TDX"),
             }
         }
     }
@@ -187,6 +189,8 @@ pub enum TeeError {
     Config(String),
     #[error("Contract error: {0}")]
     Contract(String),
+    #[error("Validation error: {0}")]
+    ValidationError(String),
 }
 
 pub mod prelude {
