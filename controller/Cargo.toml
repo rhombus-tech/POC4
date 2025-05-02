@@ -47,6 +47,12 @@ anyhow = "1.0"
 
 # Crypto
 sha2 = "0.10"
+polynomial_commitments = { path = "../polynomial_commitments", features = ["tee_integration"] }
+rand_chacha = "0.3.1"
+byteorder = "1.4"
+ff = "0.13"
+ndarray = "0.15"
+pasta_curves = "0.5.1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

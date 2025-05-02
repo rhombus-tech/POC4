@@ -4,6 +4,8 @@ use tokio::sync::RwLock;
 use clap::{Parser, Subcommand};
 use log::{info, error, debug};
 use tee_controller::enarx::controller::EnarxController;
+use tee_controller::PolynomialController; // Import our polynomial controller
+use tee_controller::polynomial_integration::extend_tee_executor; // Import our extension function
 use tee_interface::TeeType as InterfaceTeeType;
 use tee_controller::mesh::{MeshConfig, MeshCoordinator, TeeType as MeshTeeType};
 use tee_controller::paired_executor::TeeExecutorPair;
@@ -271,6 +273,21 @@ async fn main() -> Result<(), std::io::Error> {
         }
     };
     
+    // Create the polynomial commitment controller for SGX
+    let poly_sgx_controller = match PolynomialController::new(InterfaceTeeType::SGX).await {
+        Ok(controller) => controller,
+        Err(e) => {
+            error!("Failed to initialize polynomial SGX controller: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("Polynomial SGX initialization error: {:?}", e)
+            ));
+        }
+    };
+    
+    // Extend SGX controller with polynomial commitment capabilities
+    let extended_sgx_controller = extend_tee_executor(sgx_controller, poly_sgx_controller);
+    
     let sev_controller = match EnarxController::new(
         InterfaceTeeType::SEV, 
         args.base_dir.join("sev").to_str().unwrap_or("./sev"), 
@@ -286,9 +303,24 @@ async fn main() -> Result<(), std::io::Error> {
         }
     };
     
+    // Create the polynomial commitment controller for SEV
+    let poly_sev_controller = match PolynomialController::new(InterfaceTeeType::SEV).await {
+        Ok(controller) => controller,
+        Err(e) => {
+            error!("Failed to initialize polynomial SEV controller: {:?}", e);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("Polynomial SEV initialization error: {:?}", e)
+            ));
+        }
+    };
+    
+    // Extend SEV controller with polynomial commitment capabilities
+    let extended_sev_controller = extend_tee_executor(sev_controller, poly_sev_controller);
+    
     // Wrap the controllers in Arc<RwLock>
-    let sgx = Arc::new(RwLock::new(sgx_controller));
-    let sev = Arc::new(RwLock::new(sev_controller));
+    let sgx = Arc::new(RwLock::new(extended_sgx_controller));
+    let sev = Arc::new(RwLock::new(extended_sev_controller));
     
     // Generate a TEE ID if not provided
     let tee_id = match args.tee_id {
