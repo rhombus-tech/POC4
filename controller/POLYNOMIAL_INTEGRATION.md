@@ -2,6 +2,58 @@
 
 This document describes how to use the polynomial commitment operations integrated with the TEE controller.
 
+## The Accidental Computer
+
+Our polynomial commitment implementation is based on "The Accidental Computer: Polynomial Commitments from Data Availability" (Evans & Angeris, 2025). The key insight of this approach is that tensor-based encoding creates an "accidental computer" that efficiently computes multivariate polynomial evaluations.
+
+### Core Concepts
+
+The "accidental computer" leverages tensor operations (Z = G*X*G'ᵀ) to implement:
+
+1. **Efficient Commitment** - Create compact commitments to large polynomial data
+2. **Verifiable Evaluation** - Allow anyone to verify evaluations at specific points without seeing the entire polynomial
+3. **Succinct Proofs** - Verification requires minimal data exchange
+
+This approach provides exceptional space efficiency and security guarantees while maintaining hardware-level performance through our TEE implementation.
+
+### TEE-Enhanced Security Model
+
+Our implementation enhances the base "accidental computer" with hardware-level security through our TEE mesh network:
+
+1. **Multi-TEE Architecture** - Operations are executed across a mesh of different TEE types (SGX, SEV, TDX)
+2. **Cross-Attestation** - Commitments include attestation proofs from multiple TEE types
+3. **Hardware Diversity** - Using different hardware TEEs requires an attacker to compromise multiple architectures
+4. **Verifiable Execution** - Every polynomial operation comes with hardware attestation guarantees
+
+### Why TEEs Enhance the Accidental Computer
+
+TEEs and the accidental computer polynomial commitment system create a powerful synergy by addressing different aspects of security and trust:
+
+1. **Complementary Trust Models**
+   - The accidental computer provides *mathematical guarantees* (cryptographic security)
+   - TEEs provide *hardware guarantees* (physical isolation)
+   - Together they create two independent verification layers an attacker must overcome
+
+2. **Protection of Private Inputs**
+   - One vulnerability of polynomial commitments is that the original data (the polynomial coefficients) must be kept private
+   - TEEs provide hardware-enforced memory isolation to protect this data during computation
+   - Even a compromised operating system cannot access the raw polynomial data
+
+3. **Verifiable Parameter Generation**
+   - Many polynomial commitment schemes are vulnerable to parameter subversion attacks
+   - TEEs can generate and attest that parameters were correctly created
+   - The attestation proofs verify that no backdoors exist in the commitment parameters
+
+4. **Deterministic Execution**
+   - TEEs ensure that the polynomial operations execute exactly as intended
+   - This prevents side-channel attacks that could extract information about the polynomial
+   - Critical for operations where timing or power analysis could leak information
+
+5. **Cross-Validation Architecture**
+   - Our multi-TEE approach runs the same polynomial operation on different hardware
+   - This ensures that a vulnerability in one TEE implementation doesn't compromise security
+   - Creates a "defense in depth" approach to securing the polynomial commitments
+
 ## Overview
 
 The polynomial commitment module provides two secure operations:
